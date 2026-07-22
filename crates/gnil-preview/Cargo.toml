@@ -1,0 +1,20 @@
+[package]
+name = "gnil-preview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gnil-core = { path = "../gnil-core" }
+image.workspace = true
+mime_guess.workspace = true
+syntect.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
+

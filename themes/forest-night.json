@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "name": "Forest Night",
+  "appearance": "dark",
+  "colors": {
+    "background": "#101511",
+    "surface": "#171d18",
+    "surface_elevated": "#1e261f",
+    "border": "#2b352d",
+    "border_focused": "#405044",
+    "text_muted": "#8d9b90",
+    "text": "#cbd5cd",
+    "text_emphasized": "#f0f4f1",
+    "accent": "#91b39a",
+    "accent_background": "#27382b",
+    "accent_hover": "#344a39",
+    "danger": "#d47d73",
+    "error": "#d6a094",
+    "warning": "#c4aa73",
+    "git_added": "#82ad8c",
+    "git_modified": "#c4aa73",
+    "git_deleted": "#d28c82",
+    "git_untracked": "#88a2b2"
+  }
+}

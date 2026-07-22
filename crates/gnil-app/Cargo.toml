@@ -1,0 +1,27 @@
+[package]
+name = "gnil-fm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+crossbeam-channel.workspace = true
+dirs.workspace = true
+gnil-core = { path = "../gnil-core" }
+gnil-clipboard = { path = "../gnil-clipboard" }
+gnil-fs = { path = "../gnil-fs" }
+gnil-preview = { path = "../gnil-preview" }
+gpui.workspace = true
+regex.workspace = true
+unicode-segmentation.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "gnil-fm"
+path = "src/main.rs"

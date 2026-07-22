@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=gnil
+GenericName=File Manager
+Comment=A calm, keyboard-friendly file manager
+Exec=gnil-fm %U
+Icon=gnil-fm
+Terminal=false
+Categories=System;FileTools;FileManager;
+MimeType=inode/directory;
+StartupNotify=true
+StartupWMClass=gnil-fm
+

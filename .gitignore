@@ -1,0 +1,8 @@
+/target
+/result
+/result-*
+assets/brand/generated/*-chroma.png
+/.direnv
+/.envrc
+*.log
+*.gnil-part-*

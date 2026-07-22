@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.gnil_fm.Gnil</id>
+  <name>gnil</name>
+  <summary>A calm, keyboard-friendly file manager</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>gnil is a native Rust file manager for Wayland with fast navigation,
+    bounded previews, safe file operations, and optional Yazi-style keys.</p>
+  </description>
+  <launchable type="desktop-id">gnil-fm.desktop</launchable>
+  <provides><binary>gnil-fm</binary></provides>
+  <content_rating type="oars-1.1" />
+</component>
