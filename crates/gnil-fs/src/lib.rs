@@ -16,7 +16,7 @@ pub use devices::{
     unmount_device,
 };
 pub use git::{GitStatusSnapshot, scan_git_status};
-pub use operation::{OperationError, OperationExecutor};
+pub use operation::{OperationError, OperationExecutor, validate_transfer_destination};
 pub use scan::{ScanOptions, scan_directory};
 pub use scheduler::{JobContext, JobHandle, TaskScheduler};
 pub use search::{SearchHit, SearchOptions, fuzzy_match_score, search_paths};

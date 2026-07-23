@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.gnilfm
+Exec=@portal_executable@
+SystemdService=xdg-desktop-portal-gnilfm.service

@@ -4,20 +4,29 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+default-run = "gnil-fm"
 
 [dependencies]
 anyhow.workspace = true
+async-channel.workspace = true
+async-io.workspace = true
 chrono.workspace = true
 crossbeam-channel.workspace = true
 dirs.workspace = true
+globset.workspace = true
+futures-lite.workspace = true
 gnil-core = { path = "../gnil-core" }
 gnil-clipboard = { path = "../gnil-clipboard" }
 gnil-fs = { path = "../gnil-fs" }
 gnil-preview = { path = "../gnil-preview" }
 gpui.workspace = true
+mime_guess.workspace = true
+quick-xml.workspace = true
 regex.workspace = true
 unicode-segmentation.workspace = true
 url.workspace = true
+zbus.workspace = true
+lucide-icons = "1.25"
 
 [lints]
 workspace = true
@@ -25,3 +34,7 @@ workspace = true
 [[bin]]
 name = "gnil-fm"
 path = "src/main.rs"
+
+[[bin]]
+name = "gnil-fm-portal"
+path = "src/bin/portal.rs"

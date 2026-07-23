@@ -23,6 +23,8 @@ pub enum OperationError {
     Conflict(PathBuf),
     #[error("refusing to copy a directory into itself: {0}")]
     RecursiveDestination(PathBuf),
+    #[error("destination is not a directory: {0}")]
+    InvalidDestination(PathBuf),
     #[error("path has no file name: {0}")]
     MissingFileName(PathBuf),
     #[error("invalid permission mode: {0:o}")]
@@ -43,6 +45,25 @@ pub enum OperationError {
 
 #[derive(Default)]
 pub struct OperationExecutor;
+
+/// Validate the non-conflict-sensitive invariants shared by drag previews and actual transfers.
+/// The executor repeats this validation when it runs so a stale UI preview cannot bypass it.
+pub fn validate_transfer_destination(
+    sources: &[PathBuf],
+    destination: &Path,
+) -> Result<(), OperationError> {
+    if !fs::metadata(destination).is_ok_and(|metadata| metadata.is_dir()) {
+        return Err(OperationError::InvalidDestination(destination.to_path_buf()));
+    }
+    for source in sources {
+        fs::symlink_metadata(source)?;
+        let name = source
+            .file_name()
+            .ok_or_else(|| OperationError::MissingFileName(source.clone()))?;
+        guard_recursive_destination(source, &destination.join(name))?;
+    }
+    Ok(())
+}
 
 // Keep an executor value in the public API so policy and progress hooks can be added without
 // changing every caller when the MVP grows beyond local operations.
@@ -288,6 +309,7 @@ impl OperationExecutor {
         conflict: ConflictDecision,
         cancelled: &AtomicBool,
     ) -> Result<OperationOutcome, OperationError> {
+        validate_transfer_destination(sources, destination)?;
         let mut affected = Vec::new();
         let mut skipped = Vec::new();
         for source in sources {
@@ -327,6 +349,7 @@ impl OperationExecutor {
         conflict: ConflictDecision,
         cancelled: &AtomicBool,
     ) -> Result<OperationOutcome, OperationError> {
+        validate_transfer_destination(sources, destination)?;
         let mut affected = Vec::new();
         let mut skipped = Vec::new();
         let mut undo_pairs = Vec::new();
@@ -939,6 +962,24 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(error, OperationError::RecursiveDestination(_)));
+    }
+
+    #[test]
+    fn transfer_preview_rejects_non_directory_and_self_targets() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("folder");
+        let file = root.path().join("notes.txt");
+        fs::create_dir(&source).unwrap();
+        fs::write(&file, b"notes").unwrap();
+
+        assert!(matches!(
+            validate_transfer_destination(std::slice::from_ref(&source), &file),
+            Err(OperationError::InvalidDestination(path)) if path == file
+        ));
+        assert!(matches!(
+            validate_transfer_destination(std::slice::from_ref(&source), &source),
+            Err(OperationError::RecursiveDestination(_))
+        ));
     }
 
     #[test]

@@ -10,7 +10,7 @@
     {
       "name": "gnil-fm application mark",
       "source_id": "019f7e26-07a3-70f0-8e52-e484c99e9545/exec-a4141789-974e-4d99-a5ba-25dc40762691.png",
-      "master": "generated/gnil-fm-master.png",
+      "master": "generated/gnil-fm-anime-master.jpg",
       "vector": "gnil-fm.svg",
       "derivatives": [
         "generated/gnil-fm-512.png",
@@ -19,33 +19,7 @@
         "generated/gnil-fm-64.png",
         "generated/gnil-fm-32.png"
       ],
-      "prompt_summary": "Abstract open folder in restrained graphite, sage and off-white; simple silhouette; explicitly no letters, words, monogram or decorative effects."
-    },
-    {
-      "name": "folder row icon",
-      "source_id": "019f7e26-07a3-70f0-8e52-e484c99e9545/exec-21578e32-9a57-4e73-b18b-31105e333d79.png",
-      "master": "generated/folder-master.png",
-      "derivatives": [
-        "generated/folder-64.png",
-        "generated/folder-32.png",
-        "generated/folder-24.png",
-        "generated/folder-16.png"
-      ],
-      "prompt_summary": "Closed folder row icon with graphite outline and sage fill; optimized for 16-24 px; no logo mark, text or extra objects."
-    },
-    {
-      "name": "folder state icon set",
-      "source_ids": {
-        "closed": "019f7e26-07a3-70f0-8e52-e484c99e9545/exec-3a2e169c-c2cb-4904-93ec-6671f09198a7.png",
-        "open": "019f7e26-07a3-70f0-8e52-e484c99e9545/exec-65697fe8-6a70-4eff-90fc-0b3e72f6c08d.png",
-        "favorite": "019f7e26-07a3-70f0-8e52-e484c99e9545/exec-dcf9c7c8-66a4-4fb8-adb7-a42f4e579f2c.png",
-        "symlink": "019f7e26-07a3-70f0-8e52-e484c99e9545/exec-c0effe90-fef6-4760-8ebd-599cce7f4b14.png",
-        "readonly": "019f7e26-07a3-70f0-8e52-e484c99e9545/exec-ac2b8e00-ae9f-4317-a3ab-c87450925a52.png"
-      },
-      "masters": "../icons/generated/folder-*-master.png",
-      "vectors": "../icons/folder-{closed,open,favorite,symlink,readonly}.svg",
-      "raster_archive": "../icons/folder-{closed,open,favorite,symlink,readonly}-{16,24,32,64}.png",
-      "prompt_summary": "A coherent family of flat two-tone folder state pictograms with hard geometry, sparse semantic badges and a silhouette readable at 16 px."
+      "prompt_summary": "Minimal anime aesthetic application logo mark featuring an abstract geometric file folder icon in sage and graphite; simple silhouette, no characters, no text."
     },
     {
       "name": "file kind icon set",
@@ -65,14 +39,12 @@
     },
     {
       "name": "empty folder illustration",
-      "source_id": "019f7e26-07a3-70f0-8e52-e484c99e9545/exec-c074e026-9161-4038-8b20-7909b4ad844a.png",
-      "master": "../icons/generated/empty-state-master.png",
-      "derivatives": [
-        "../icons/empty-state.svg",
-        "../icons/empty-state.png",
-        "../icons/empty-state.webp"
-      ],
-      "prompt_summary": "A calm empty folder with three floating paper shapes, transparent background, sparse graphite and sage composition."
+      "source_id": "019f88bb-1a6a-7d90-bed1-3d0c8d2918fb/exec-cd1dbd51-2c80-4af5-b710-314e6d04478c.png",
+      "reference": "user-provided empty-folder composition",
+      "master": "../icons/empty-state.webp",
+      "format": "768x586 lossless WebP with alpha",
+      "postprocess": "Magenta chroma removal and matte despill before lossless WebP encoding.",
+      "prompt_summary": "An original calm empty-folder character with two blank papers, a sparse cobweb, a zero bubble and a tiny paper butterfly flight path, adapted to the gnil-fm sage, graphite and off-white palette."
     }
   ]
 }

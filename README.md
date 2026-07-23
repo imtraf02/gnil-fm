@@ -16,6 +16,7 @@ background jobs, and bounded previews.
 - safe copy/move/create/rename/trash/permanent-delete engine with conflict policies and session undo
 - staged, cancellable extraction for ZIP, TAR, 7z, RAR and common compressed streams
 - XDG configuration, Nix dev shell/package and Linux desktop metadata
+- D-Bus-activatable FileChooser portal backend with read-only Open, Save and SaveFiles dialogs
 
 ## Develop
 
@@ -90,6 +91,7 @@ For a NixOS system installation:
 ```nix
 imports = [ inputs.gnil-fm.nixosModules.default ];
 programs.gnil-fm.enable = true;
+programs.gnil-fm.portal.enable = true; # opt in as Niri's FileChooser backend
 ```
 
 For a per-user Home Manager installation and optional default directory handler:
@@ -99,10 +101,25 @@ imports = [ inputs.gnil-fm.homeManagerModules.default ];
 programs.gnil-fm = {
   enable = true;
   defaultFileManager = true;
+  portal.enable = true;
 };
 ```
 
-`defaultFileManager` is off by default; enabling the module alone never changes MIME preferences.
+`defaultFileManager` and `portal.enable` are off by default. The portal option selects
+`gnilfm;gtk;` for `org.freedesktop.impl.portal.FileChooser`, leaving GTK as a fallback. The Home
+Manager option owns `xdg-desktop-portal/niri-portals.conf`; keep it disabled if that file is managed
+elsewhere. Log out and back in after changing portal selection so the session services restart.
+
+The backend executable is `gnil-fm-portal` and owns
+`org.freedesktop.impl.portal.desktop.gnilfm`. It is activated by D-Bus and can serve independent,
+concurrent picker windows even when the main file-manager window is not running. Picker windows are
+read-only: no rename, delete, paste, filesystem drag-and-drop, Trash or terminal actions are
+registered. On Wayland, `wayland:<handle>` parents are attached with xdg-foreign v2; compositors
+without that protocol receive an independent toplevel as a safe fallback.
+
+D-Bus and systemd activation metadata is wired automatically by the Nix package. The portable
+tarball includes a runnable `gnil-fm-portal` launcher, but selecting it as the session backend still
+requires installing activation metadata with paths matching the tarball's final install location.
 
 ## Safety model
 

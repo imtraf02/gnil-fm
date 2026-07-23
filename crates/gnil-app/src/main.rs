@@ -3,6 +3,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     env,
     fmt::Write as _,
+    ops::Range,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -14,6 +15,7 @@ use std::{
 mod action_menu;
 mod empty_space_menu;
 mod path_input;
+mod pointer_interaction;
 mod text_input;
 mod theme_runtime;
 
@@ -23,11 +25,17 @@ use action_menu::{
 };
 use empty_space_menu::{
     EmptySpaceMenuActivation, EmptySpaceMenuCapabilities, EmptySpaceMenuCommand,
-    EmptySpaceMenuContext, EmptySpaceMenuEntry, EmptySpaceMenuState, EmptySpaceViewState,
+    EmptySpaceMenuContext, EmptySpaceMenuEntry, EmptySpaceMenuState, EmptySpaceSubmenu,
+    EmptySpaceViewState,
 };
 use path_input::{
     PathInputState, PathSuggestion, PathTarget, completion_candidates, resolve_path_input,
     single_pasted_path, validate_path,
+};
+use pointer_interaction::{
+    ActiveFileDrag, DropIntent, DropTarget, FileDragPayload, PointerInteraction, RowPressState,
+    RUBBER_EDGE_ZONE, RubberBandState, band_span, endpoint_index, external_drop_intent,
+    internal_drop_intent, merge_from_modifiers, movement_crossed_threshold, rubber_highlighted,
 };
 use text_input::{TextInput, TextInputEvent};
 use theme_runtime::{
@@ -55,11 +63,12 @@ use gnil_fs::{
 use gnil_preview::{PreviewRequest, PreviewResult, PreviewService};
 use gpui::{
     AnchoredPositionMode, Animation, AnimationExt as _, AnyElement, App, Application, AssetSource,
-    Bounds, ClickEvent, ClipboardItem, Context, Corner, Div, Entity, FocusHandle, Focusable,
-    KeyBinding, MouseButton, MouseDownEvent, PromptLevel, Render, ScrollStrategy, SharedString,
-    Stateful, Subscription, UniformListScrollHandle, Window, WindowAppearance, WindowBounds,
-    WindowOptions, actions, anchored, deferred, div, img, point, prelude::*, px, relative, rgb,
-    size, uniform_list,
+    Bounds, ClickEvent, ClipboardItem, Context, Corner, CursorStyle, Div, DragMoveEvent, Entity,
+    ExternalPaths, FocusHandle, Focusable, Hsla, KeyBinding, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PromptLevel, Render, ScrollStrategy,
+    SharedString, Stateful, Subscription, UniformListScrollHandle, Window, WindowAppearance,
+    WindowBounds, WindowOptions, actions, anchored, deferred, div, img, point, prelude::*, px,
+    relative, rgb, size, uniform_list,
 };
 
 actions!(
@@ -108,6 +117,7 @@ actions!(
         SelectAllEntries,
         RestoreTrashSelected,
         EmptyTrash,
+        CancelPointerInteraction,
         ActivatePathInput,
         SubmitPathInput,
         DismissPathInput,
@@ -123,6 +133,8 @@ actions!(
 const FILE_GIT_COLUMN_WIDTH: f32 = 24.0;
 const FILE_SIZE_COLUMN_WIDTH: f32 = 92.0;
 const FILE_MODIFIED_COLUMN_WIDTH: f32 = 132.0;
+const FILE_ROW_HEIGHT: f32 = 36.0;
+const TRASH_ROW_HEIGHT: f32 = 42.0;
 
 struct Assets;
 
@@ -203,6 +215,24 @@ impl AssetSource for Assets {
             "icons/folder-readonly.svg" => {
                 Some(include_bytes!("../../../assets/icons/folder-readonly.svg"))
             }
+            "icons/folder-downloads.svg" => {
+                Some(include_bytes!("../../../assets/icons/folder-downloads.svg"))
+            }
+            "icons/folder-pictures.svg" => {
+                Some(include_bytes!("../../../assets/icons/folder-pictures.svg"))
+            }
+            "icons/folder-documents.svg" => {
+                Some(include_bytes!("../../../assets/icons/folder-documents.svg"))
+            }
+            "icons/folder-videos.svg" => {
+                Some(include_bytes!("../../../assets/icons/folder-videos.svg"))
+            }
+            "icons/folder-music.svg" => {
+                Some(include_bytes!("../../../assets/icons/folder-music.svg"))
+            }
+            "icons/folder-desktop.svg" => {
+                Some(include_bytes!("../../../assets/icons/folder-desktop.svg"))
+            }
             "icons/file-generic.svg" => {
                 Some(include_bytes!("../../../assets/icons/file-generic.svg"))
             }
@@ -218,6 +248,9 @@ impl AssetSource for Assets {
             "icons/file-media.svg" => Some(include_bytes!("../../../assets/icons/file-media.svg")),
             "icons/empty-state.svg" => {
                 Some(include_bytes!("../../../assets/icons/empty-state.svg"))
+            }
+            "icons/trash-empty.svg" => {
+                Some(include_bytes!("../../../assets/icons/trash-empty.svg"))
             }
             "icons/trash.svg" => Some(include_bytes!("../../../assets/icons/trash.svg")),
             "icons/device-usb.svg" => Some(include_bytes!("../../../assets/icons/device-usb.svg")),
@@ -259,6 +292,64 @@ impl AssetSource for Assets {
     }
 }
 
+struct DragGhost {
+    payload: FileDragPayload,
+    cursor_offset: gpui::Point<Pixels>,
+}
+
+impl Render for DragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let lifted = self.payload.visual.lifted();
+        let copy = self.payload.visual.copy();
+        let count = self.payload.paths.len();
+        div()
+            .pl(self.cursor_offset.x - px(12.0))
+            .pt(self.cursor_offset.y - px(18.0))
+            .opacity(if lifted { 1.0 } else { 0.0 })
+            .child(
+                div()
+                    .h(px(38.0))
+                    .max_w(px(236.0))
+                    .px_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(if copy { accent() } else { border_focused() }))
+                    .bg(rgb(surface_elevated()))
+                    .shadow_md()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(rgb(text_emphasized()))
+                    .child(img(self.payload.first_icon).size_5())
+                    .child(
+                        div()
+                            .max_w(px(150.0))
+                            .truncate()
+                            .child(self.payload.first_name.clone()),
+                    )
+                    .when(count > 1, |ghost| {
+                        ghost.child(
+                            div()
+                                .h_5()
+                                .min_w(px(24.0))
+                                .px_1()
+                                .rounded_full()
+                                .bg(rgb(accent_background()))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(count.to_string()),
+                        )
+                    })
+                    .when(copy, |ghost| {
+                        ghost.child(div().text_color(rgb(accent())).child("Copy"))
+                    }),
+            )
+    }
+}
+
 #[allow(clippy::struct_excessive_bools)]
 struct FileManager {
     focus_handle: FocusHandle,
@@ -289,6 +380,9 @@ struct FileManager {
     _path_input_subscription: Subscription,
     pending_reveal: Option<PathBuf>,
     file_list_scroll: UniformListScrollHandle,
+    rendered_file_range: Range<usize>,
+    pointer_interaction: PointerInteraction,
+    pointer_serial: u64,
     reduced_motion: bool,
     git_status_enabled: bool,
     trash_entries: Vec<TrashEntry>,
@@ -370,6 +464,9 @@ impl FileManager {
             _path_input_subscription: path_input_subscription,
             pending_reveal: None,
             file_list_scroll: UniformListScrollHandle::new(),
+            rendered_file_range: 0..0,
+            pointer_interaction: PointerInteraction::Idle,
+            pointer_serial: 0,
             reduced_motion: settings.reduced_motion,
             git_status_enabled: settings.git_status_enabled,
             trash_entries: Vec::new(),
@@ -392,6 +489,20 @@ impl FileManager {
     fn load_directory(&mut self, cx: &mut Context<Self>) {
         self.action_menu = None;
         self.empty_space_menu = None;
+        match std::mem::take(&mut self.pointer_interaction) {
+            PointerInteraction::RowArmed(press) => {
+                press.payload.visual.set_lifted(false);
+                press.payload.visual.set_valid_target(false);
+                self.selection = press.baseline;
+            }
+            PointerInteraction::FileDrag(drag) => {
+                drag.press.payload.visual.set_lifted(false);
+                drag.press.payload.visual.set_valid_target(false);
+                self.selection = drag.press.baseline;
+            }
+            PointerInteraction::RubberBand(state) => self.selection = state.baseline,
+            PointerInteraction::Idle => {}
+        }
         if self.path_input.editing {
             self.path_input.dismiss();
             self.path_input
@@ -656,21 +767,485 @@ impl FileManager {
     }
 
     fn select_from_click(&mut self, index: usize, event: &ClickEvent, cx: &mut Context<Self>) {
-        let modifiers = event.modifiers();
-        if modifiers.shift {
+        self.pointer_interaction = PointerInteraction::Idle;
+        self.select_from_modifiers(index, event.modifiers());
+        self.selection_changed(cx);
+    }
+
+    fn select_from_modifiers(&mut self, index: usize, modifiers: gpui::Modifiers) {
+        if modifiers.shift && (modifiers.control || modifiers.platform) {
+            self.selection
+                .extend_to_additive(index, &self.snapshot.entries);
+        } else if modifiers.shift {
             self.selection.extend_to(index, &self.snapshot.entries);
         } else if modifiers.control || modifiers.platform {
             self.selection.toggle(index, &self.snapshot.entries);
         } else {
             self.selection.select_only(index, &self.snapshot.entries);
         }
-        self.tab.selected_path = self
-            .snapshot
-            .entries
-            .get(index)
-            .map(|entry| entry.path.clone());
-        self.load_preview(cx);
+    }
+
+    fn arm_row_drag(
+        &mut self,
+        index: usize,
+        payload: FileDragPayload,
+        event: &MouseDownEvent,
+    ) {
+        self.pointer_interaction = PointerInteraction::RowArmed(RowPressState {
+            origin: event.position,
+            index,
+            baseline: self.selection.clone(),
+            modifiers: event.modifiers,
+            payload,
+        });
+    }
+
+    fn begin_rubber_band(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if self.snapshot.entries.is_empty() {
+            if merge_from_modifiers(event.modifiers) == gnil_core::SelectionMerge::Replace {
+                self.selection.clear();
+                self.selection_changed(cx);
+            }
+            return;
+        }
+        let (viewport, offset_y) = self.file_list_metrics();
+        self.pointer_serial = self.pointer_serial.wrapping_add(1);
+        let content_y = f32::from(event.position.y - viewport.top()) - offset_y;
+        self.pointer_interaction = PointerInteraction::RubberBand(RubberBandState {
+            serial: self.pointer_serial,
+            origin: event.position,
+            current: event.position,
+            origin_content_y: content_y,
+            current_content_y: content_y,
+            baseline: self.selection.clone(),
+            merge: merge_from_modifiers(event.modifiers),
+            crossed_threshold: false,
+            hit_span: None,
+            autoscroll_scheduled: false,
+        });
         cx.notify();
+    }
+
+    fn file_list_metrics(&self) -> (Bounds<Pixels>, f32) {
+        let state = self.file_list_scroll.0.borrow();
+        (
+            state.base_handle.bounds(),
+            f32::from(state.base_handle.offset().y),
+        )
+    }
+
+    fn active_row_height(&self) -> f32 {
+        if self.tab.root == TabRoot::Trash {
+            TRASH_ROW_HEIGHT
+        } else {
+            FILE_ROW_HEIGHT
+        }
+    }
+
+    fn update_rubber_band(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        schedule_autoscroll: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let (viewport, offset_y) = self.file_list_metrics();
+        let row_height = self.active_row_height();
+        let item_count = self.snapshot.entries.len();
+        let rendered_range = self.rendered_file_range.clone();
+        let viewport_left = f32::from(viewport.left());
+        let viewport_right = f32::from(viewport.right());
+        let mut should_schedule = false;
+        if let PointerInteraction::RubberBand(state) = &mut self.pointer_interaction {
+            state.current = position;
+            state.current_content_y = f32::from(position.y - viewport.top()) - offset_y;
+            state.crossed_threshold |= movement_crossed_threshold(state.origin, position);
+            let left = f32::from(state.origin.x).min(f32::from(position.x));
+            let right = f32::from(state.origin.x).max(f32::from(position.x));
+            let candidate_span = band_span(
+                state.origin_content_y,
+                state.current_content_y,
+                row_height,
+                item_count,
+                right >= viewport_left && left <= viewport_right,
+            );
+            state.hit_span = candidate_span.filter(|span| {
+                !rendered_range.is_empty()
+                    && *span.end() >= rendered_range.start
+                    && *span.start() < rendered_range.end
+            });
+            should_schedule = schedule_autoscroll
+                && state.crossed_threshold
+                && !state.autoscroll_scheduled
+                && Self::rubber_scroll_velocity(viewport, position) != 0.0;
+        }
+        if should_schedule {
+            self.schedule_rubber_autoscroll(cx);
+        }
+        cx.notify();
+    }
+
+    fn rubber_scroll_velocity(
+        viewport: Bounds<Pixels>,
+        position: gpui::Point<Pixels>,
+    ) -> f32 {
+        let top = f32::from(viewport.top());
+        let bottom = f32::from(viewport.bottom());
+        let y = f32::from(position.y);
+        let penetration = if y < top + RUBBER_EDGE_ZONE {
+            -((top + RUBBER_EDGE_ZONE - y) / RUBBER_EDGE_ZONE).clamp(0.0, 1.0)
+        } else if y > bottom - RUBBER_EDGE_ZONE {
+            ((y - (bottom - RUBBER_EDGE_ZONE)) / RUBBER_EDGE_ZONE).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if penetration == 0.0 {
+            0.0
+        } else {
+            penetration.signum() * (3.0 + 11.0 * penetration.abs().powi(2))
+        }
+    }
+
+    fn schedule_rubber_autoscroll(&mut self, cx: &mut Context<Self>) {
+        let serial = match &mut self.pointer_interaction {
+            PointerInteraction::RubberBand(state) if !state.autoscroll_scheduled => {
+                state.autoscroll_scheduled = true;
+                state.serial
+            }
+            _ => return,
+        };
+        let timer = cx.background_executor().timer(Duration::from_millis(16));
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                let position = match &mut this.pointer_interaction {
+                    PointerInteraction::RubberBand(state) if state.serial == serial => {
+                        state.autoscroll_scheduled = false;
+                        state.current
+                    }
+                    _ => return,
+                };
+                let (viewport, _) = this.file_list_metrics();
+                let velocity = Self::rubber_scroll_velocity(viewport, position);
+                if velocity == 0.0 {
+                    return;
+                }
+                let base_handle = this.file_list_scroll.0.borrow().base_handle.clone();
+                let offset = base_handle.offset();
+                let max_offset = f32::from(base_handle.max_offset().height);
+                let next_y = (f32::from(offset.y) - velocity).clamp(-max_offset, 0.0);
+                base_handle.set_offset(point(offset.x, px(next_y)));
+                this.update_rubber_band(position, true, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn handle_pointer_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(&self.pointer_interaction, PointerInteraction::RubberBand(_))
+            && event.dragging()
+        {
+            self.update_rubber_band(event.position, true, cx);
+        }
+    }
+
+    fn handle_file_drag_move(
+        &mut self,
+        event: &DragMoveEvent<FileDragPayload>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let copy = event.event.modifiers.control || event.event.modifiers.platform;
+        event.drag(cx).visual.set_valid_target(false);
+        let mut became_active = None;
+        match &mut self.pointer_interaction {
+            PointerInteraction::RowArmed(press)
+                if movement_crossed_threshold(press.origin, event.event.position) =>
+            {
+                press.payload.visual.set_lifted(true);
+                press.payload.visual.set_copy(copy);
+                became_active = Some(press.clone());
+            }
+            PointerInteraction::FileDrag(drag) => {
+                drag.copy = copy;
+                drag.press.payload.visual.set_copy(copy);
+            }
+            _ => {}
+        }
+        if let Some(press) = became_active {
+            let pressed_is_selected = self
+                .snapshot
+                .entries
+                .get(press.index)
+                .is_some_and(|entry| press.baseline.is_highlighted(press.index, entry));
+            let selection_changed = !pressed_is_selected;
+            if selection_changed {
+                self.selection
+                    .select_only(press.index, &self.snapshot.entries);
+            }
+            self.pointer_interaction = PointerInteraction::FileDrag(ActiveFileDrag {
+                press,
+                copy,
+            });
+            if selection_changed {
+                self.selection_changed(cx);
+            }
+        }
+        let cursor = if matches!(&self.pointer_interaction, PointerInteraction::FileDrag(_)) {
+            if copy {
+                CursorStyle::DragCopy
+            } else {
+                CursorStyle::OperationNotAllowed
+            }
+        } else {
+            CursorStyle::Arrow
+        };
+        cx.set_active_drag_cursor_style(cursor, window);
+        cx.notify();
+    }
+
+    fn handle_drag_modifiers(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let PointerInteraction::FileDrag(drag) = &mut self.pointer_interaction {
+            drag.copy = event.modifiers.control || event.modifiers.platform;
+            drag.press.payload.visual.set_copy(drag.copy);
+            cx.set_active_drag_cursor_style(
+                if !drag.press.payload.visual.valid_target() {
+                    CursorStyle::OperationNotAllowed
+                } else if drag.copy {
+                    CursorStyle::DragCopy
+                } else {
+                    CursorStyle::ClosedHand
+                },
+                window,
+            );
+            cx.notify();
+        }
+    }
+
+    fn finish_rubber_band(&mut self, state: RubberBandState, cx: &mut Context<Self>) {
+        if !state.crossed_threshold {
+            if state.merge == gnil_core::SelectionMerge::Replace {
+                self.selection.clear();
+            } else {
+                self.selection = state.baseline;
+            }
+        } else {
+            let cursor = endpoint_index(
+                state.hit_span.as_ref(),
+                state.origin_content_y,
+                state.current_content_y,
+            );
+            if let Some(span) = state.hit_span {
+                self.selection.apply_indices(
+                    &state.baseline,
+                    span,
+                    state.merge,
+                    cursor,
+                    &self.snapshot.entries,
+                );
+            } else {
+                self.selection.apply_indices(
+                    &state.baseline,
+                    std::iter::empty(),
+                    state.merge,
+                    None,
+                    &self.snapshot.entries,
+                );
+            }
+        }
+        self.selection_changed(cx);
+    }
+
+    fn finish_pointer_interaction(
+        &mut self,
+        _event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let interaction = std::mem::take(&mut self.pointer_interaction);
+        match interaction {
+            PointerInteraction::Idle => {}
+            PointerInteraction::RowArmed(press) => {
+                press.payload.visual.set_lifted(false);
+                press.payload.visual.set_valid_target(false);
+                self.select_from_modifiers(press.index, press.modifiers);
+                self.selection_changed(cx);
+                cx.stop_active_drag(window);
+            }
+            PointerInteraction::FileDrag(drag) => {
+                drag.press.payload.visual.set_lifted(false);
+                drag.press.payload.visual.set_valid_target(false);
+                self.selection = drag.press.baseline;
+                self.selection_changed(cx);
+                cx.stop_active_drag(window);
+            }
+            PointerInteraction::RubberBand(state) => self.finish_rubber_band(state, cx),
+        }
+    }
+
+    fn cancel_pointer_interaction(
+        &mut self,
+        _: &CancelPointerInteraction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let interaction = std::mem::take(&mut self.pointer_interaction);
+        match interaction {
+            PointerInteraction::RowArmed(press) => {
+                press.payload.visual.set_lifted(false);
+                press.payload.visual.set_valid_target(false);
+                self.selection = press.baseline;
+            }
+            PointerInteraction::FileDrag(drag) => {
+                drag.press.payload.visual.set_lifted(false);
+                drag.press.payload.visual.set_valid_target(false);
+                self.selection = drag.press.baseline;
+            }
+            PointerInteraction::RubberBand(state) => self.selection = state.baseline,
+            PointerInteraction::Idle => return,
+        }
+        cx.stop_active_drag(window);
+        self.selection_changed(cx);
+    }
+
+    fn can_internal_drop(&self, payload: &FileDragPayload, target: &DropTarget) -> bool {
+        can_internal_drop_value(payload, target, self.operation_running)
+    }
+
+    fn external_paths(paths: &ExternalPaths) -> Vec<PathBuf> {
+        sanitized_external_paths(paths)
+    }
+
+    fn can_external_drop(&self, paths: &ExternalPaths, target: &DropTarget) -> bool {
+        can_external_drop_value(paths, target, self.operation_running)
+    }
+
+    fn update_internal_drop_cursor(
+        &mut self,
+        event: &DragMoveEvent<FileDragPayload>,
+        target: &DropTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.bounds.contains(&event.event.position) {
+            return;
+        }
+        let payload = event.drag(cx);
+        if !payload.visual.lifted() {
+            payload.visual.set_valid_target(false);
+            cx.set_active_drag_cursor_style(CursorStyle::Arrow, window);
+            return;
+        }
+        let valid = self.can_internal_drop(payload, target);
+        payload.visual.set_valid_target(valid);
+        let cursor = if valid {
+            if payload.visual.copy() {
+                CursorStyle::DragCopy
+            } else {
+                CursorStyle::ClosedHand
+            }
+        } else {
+            CursorStyle::OperationNotAllowed
+        };
+        cx.set_active_drag_cursor_style(cursor, window);
+    }
+
+    fn update_external_drop_cursor(
+        &mut self,
+        event: &DragMoveEvent<ExternalPaths>,
+        target: &DropTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.bounds.contains(&event.event.position) {
+            return;
+        }
+        let cursor = if self.can_external_drop(event.drag(cx), target) {
+            CursorStyle::DragCopy
+        } else {
+            CursorStyle::OperationNotAllowed
+        };
+        cx.set_active_drag_cursor_style(cursor, window);
+    }
+
+    fn perform_internal_drop(
+        &mut self,
+        payload: &FileDragPayload,
+        target: DropTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_internal_drop(payload, &target) {
+            return;
+        }
+        let Ok(intent) = internal_drop_intent(
+            payload,
+            &target,
+            payload.visual.copy(),
+            self.operation_running,
+        ) else {
+            return;
+        };
+        payload.visual.set_lifted(false);
+        payload.visual.set_valid_target(false);
+        self.pointer_interaction = PointerInteraction::Idle;
+        cx.stop_active_drag(window);
+        let operation = match (intent, target) {
+            (DropIntent::Move, DropTarget::Directory(destination)) => FsOperation::Move {
+                sources: payload.paths.clone(),
+                destination,
+                conflict: ConflictDecision::Ask,
+            },
+            (DropIntent::Copy, DropTarget::Directory(destination)) => FsOperation::Copy {
+                sources: payload.paths.clone(),
+                destination,
+                conflict: ConflictDecision::KeepBoth,
+            },
+            (DropIntent::Trash, DropTarget::Trash) => FsOperation::Trash {
+                paths: payload.paths.clone(),
+            },
+            _ => return,
+        };
+        let message = match intent {
+            DropIntent::Move => "Moving…",
+            DropIntent::Copy => "Copying…",
+            DropIntent::Trash => "Moving to Trash…",
+        };
+        self.start_operation(operation, message.into(), false, cx);
+    }
+
+    fn perform_external_drop(
+        &mut self,
+        paths: &ExternalPaths,
+        target: DropTarget,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_external_drop(paths, &target) {
+            return;
+        }
+        let paths = Self::external_paths(paths);
+        let DropTarget::Directory(destination) = target else {
+            return;
+        };
+        self.start_operation(
+            FsOperation::Copy {
+                sources: paths,
+                destination,
+                conflict: ConflictDecision::KeepBoth,
+            },
+            "Copying dropped files…".into(),
+            false,
+            cx,
+        );
     }
 
     fn load_preview(&mut self, cx: &mut Context<Self>) {
@@ -2362,6 +2937,11 @@ impl FileManager {
     // Sidebar groups stay together so their spacing and hierarchy remain visually auditable.
     #[allow(clippy::too_many_lines)]
     fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let operation_running = self.operation_running;
+        let trash_target = DropTarget::Trash;
+        let trash_predicate_target = trash_target.clone();
+        let trash_move_target = trash_target.clone();
+        let trash_drop_target = trash_target;
         div()
             .w(px(218.0))
             .h_full()
@@ -2371,16 +2951,6 @@ impl FileManager {
             .bg(rgb(surface()))
             .border_r_1()
             .border_color(rgb(border()))
-            .child(
-                div()
-                    .h(px(58.0))
-                    .flex()
-                    .items_center()
-                    .px_4()
-                    .gap_3()
-                    .child(img("brand/gnil-fm.svg").size_8())
-                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("gnil")),
-            )
             .child(
                 div()
                     .px_3()
@@ -2396,14 +2966,24 @@ impl FileManager {
                     .enumerate()
                     .map(|(index, (label, path))| {
                         let path = path.clone();
+                        let navigate_path = path.clone();
+                        let drop_target = DropTarget::Directory(path.clone());
+                        let predicate_target = drop_target.clone();
+                        let internal_move_target = drop_target.clone();
+                        let external_move_target = drop_target.clone();
+                        let internal_drop_target = drop_target.clone();
+                        let external_drop_target = drop_target;
                         let active = self.tab.root == TabRoot::Directory
                             && place_is_active(&self.tab.path, &path);
-                        let icon = if active {
-                            "icons/folder-open.svg"
-                        } else if label == "Home" {
-                            "icons/folder-favorite.svg"
-                        } else {
-                            "icons/folder-closed.svg"
+                        let icon = match label.as_str() {
+                            "Home" => "icons/folder-favorite.svg",
+                            "Downloads" => "icons/folder-downloads.svg",
+                            "Pictures" => "icons/folder-pictures.svg",
+                            "Documents" => "icons/folder-documents.svg",
+                            "Videos" => "icons/folder-videos.svg",
+                            "Music" => "icons/folder-music.svg",
+                            "Desktop" => "icons/folder-desktop.svg",
+                            _ => "icons/folder-closed.svg",
                         };
                         div()
                             .id(("place", index))
@@ -2423,8 +3003,62 @@ impl FileManager {
                             })
                             .when(!active, |style| style.text_color(rgb(theme_text())))
                             .hover(|style| style.bg(rgb(border())))
+                            .can_drop(move |value, _, _| {
+                                can_drop_value(value, &predicate_target, operation_running)
+                            })
+                            .drag_over::<FileDragPayload>(|style, _, _, _| {
+                                style
+                                    .bg(rgb(accent_background()))
+                                    .border_1()
+                                    .border_color(rgb(accent()))
+                            })
+                            .drag_over::<ExternalPaths>(|style, _, _, _| {
+                                style
+                                    .bg(rgb(accent_background()))
+                                    .border_1()
+                                    .border_color(rgb(accent()))
+                            })
+                            .on_drag_move::<FileDragPayload>(cx.listener(
+                                move |this, event, window, cx| {
+                                    this.update_internal_drop_cursor(
+                                        event,
+                                        &internal_move_target,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ))
+                            .on_drag_move::<ExternalPaths>(cx.listener(
+                                move |this, event, window, cx| {
+                                    this.update_external_drop_cursor(
+                                        event,
+                                        &external_move_target,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ))
+                            .on_drop(cx.listener(
+                                move |this, payload: &FileDragPayload, window, cx| {
+                                    this.perform_internal_drop(
+                                        payload,
+                                        internal_drop_target.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ))
+                            .on_drop(cx.listener(
+                                move |this, paths: &ExternalPaths, _, cx| {
+                                    this.perform_external_drop(
+                                        paths,
+                                        external_drop_target.clone(),
+                                        cx,
+                                    );
+                                },
+                            ))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.tab.navigate(path.clone());
+                                this.tab.navigate(navigate_path.clone());
                                 this.load_directory(cx);
                             }))
                             .child(img(icon).size_5())
@@ -2437,6 +3071,11 @@ impl FileManager {
                 let disconnect_id = device.id.clone();
                 let drive_id = device.drive_id.clone();
                 let eject = device.can_eject;
+                let mounted = device.mount_path.is_some();
+                let mount_target = device
+                    .mount_path
+                    .clone()
+                    .map(DropTarget::Directory);
                 let active =
                     matches!(&self.tab.root, TabRoot::Device { id, .. } if id == &device.id);
                 let usage = device_usage(device);
@@ -2453,6 +3092,67 @@ impl FileManager {
                     .cursor_pointer()
                     .when(active, |row| row.bg(rgb(accent_background())))
                     .hover(|style| style.bg(rgb(border())))
+                    .when_some(mount_target, |row, drop_target| {
+                        let predicate_target = drop_target.clone();
+                        let internal_move_target = drop_target.clone();
+                        let external_move_target = drop_target.clone();
+                        let internal_drop_target = drop_target.clone();
+                        let external_drop_target = drop_target;
+                        row.can_drop(move |value, _, _| {
+                            can_drop_value(value, &predicate_target, operation_running)
+                        })
+                        .drag_over::<FileDragPayload>(|style, _, _, _| {
+                            style
+                                .bg(rgb(accent_background()))
+                                .border_1()
+                                .border_color(rgb(accent()))
+                        })
+                        .drag_over::<ExternalPaths>(|style, _, _, _| {
+                            style
+                                .bg(rgb(accent_background()))
+                                .border_1()
+                                .border_color(rgb(accent()))
+                        })
+                        .on_drag_move::<FileDragPayload>(cx.listener(
+                            move |this, event, window, cx| {
+                                this.update_internal_drop_cursor(
+                                    event,
+                                    &internal_move_target,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ))
+                        .on_drag_move::<ExternalPaths>(cx.listener(
+                            move |this, event, window, cx| {
+                                this.update_external_drop_cursor(
+                                    event,
+                                    &external_move_target,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ))
+                        .on_drop(cx.listener(
+                            move |this, payload: &FileDragPayload, window, cx| {
+                                this.perform_internal_drop(
+                                    payload,
+                                    internal_drop_target.clone(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ))
+                        .on_drop(cx.listener(
+                            move |this, paths: &ExternalPaths, _, cx| {
+                                this.perform_external_drop(
+                                    paths,
+                                    external_drop_target.clone(),
+                                    cx,
+                                );
+                            },
+                        ))
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_device(id.clone(), cx);
                     }))
@@ -2492,7 +3192,7 @@ impl FileManager {
                                     .child(device_capacity_label(device)),
                             ),
                     )
-                    .when(device.mount_path.is_some(), |row| {
+                    .when(mounted, |row| {
                         row.child(
                             div()
                                 .id(("disconnect-device", index))
@@ -2550,6 +3250,43 @@ impl FileManager {
                         row.text_color(rgb(theme_text()))
                     })
                     .hover(|style| style.bg(rgb(border())))
+                    .can_drop(move |value, _, _| {
+                        value
+                            .downcast_ref::<FileDragPayload>()
+                            .is_some_and(|payload| {
+                                can_internal_drop_value(
+                                    payload,
+                                    &trash_predicate_target,
+                                    operation_running,
+                                )
+                            })
+                    })
+                    .drag_over::<FileDragPayload>(|style, _, _, _| {
+                        style
+                            .bg(rgb(accent_background()))
+                            .border_1()
+                            .border_color(rgb(accent()))
+                    })
+                    .on_drag_move::<FileDragPayload>(cx.listener(
+                        move |this, event, window, cx| {
+                            this.update_internal_drop_cursor(
+                                event,
+                                &trash_move_target,
+                                window,
+                                cx,
+                            );
+                        },
+                    ))
+                    .on_drop(cx.listener(
+                        move |this, payload: &FileDragPayload, window, cx| {
+                            this.perform_internal_drop(
+                                payload,
+                                trash_drop_target.clone(),
+                                window,
+                                cx,
+                            );
+                        },
+                    ))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab.navigate_trash();
                         this.load_directory(cx);
@@ -3955,8 +4692,15 @@ impl FileManager {
     #[allow(clippy::too_many_lines)]
     fn render_trash_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let selection = self.selection.clone();
+        let rubber_band = match &self.pointer_interaction {
+            PointerInteraction::RubberBand(state) => Some(state.clone()),
+            _ => None,
+        };
         let entries = Arc::new(self.trash_entries.clone());
         let count = entries.len();
+        if count == 0 {
+            self.rendered_file_range = 0..0;
+        }
         let has_selection = self.selection.selected_count() > 0;
         let body = if count == 0 {
             div()
@@ -3965,10 +4709,12 @@ impl FileManager {
                 .flex_col()
                 .items_center()
                 .justify_center()
+                .mt_8()
                 .gap_2()
-                .child(img("icons/trash.svg").size(px(96.0)))
+                .child(img("icons/trash-empty.svg").size(px(280.0)))
                 .child(
                     div()
+                        .mt_2()
                         .text_sm()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(rgb(theme_text()))
@@ -3989,22 +4735,26 @@ impl FileManager {
             uniform_list(
                 "trash-list",
                 count,
-                cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
+                cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                    this.rendered_file_range = range.clone();
                     range
                         .map(|index| {
                             let entry = entries[index].clone();
                             let file_entry = trash_entry_as_file_entry(&entry);
-                            let highlighted = selection.is_highlighted(index, &file_entry);
-                            div()
+                            let highlighted = rubber_band.as_ref().map_or_else(
+                                || selection.is_highlighted(index, &file_entry),
+                                |state| rubber_highlighted(state, index, &file_entry),
+                            );
+                            let row = div()
                                 .id(("trash-entry", index))
-                                .mx_2()
-                                .h(px(42.0))
-                                .px_3()
+                                .w_full()
+                                .h(px(TRASH_ROW_HEIGHT))
+                                .px_2()
                                 .rounded_md()
                                 .flex()
                                 .items_center()
-                                .gap_2()
                                 .cursor_pointer()
+                                .text_sm()
                                 .when(highlighted, |row| {
                                     row.bg(rgb(accent_background()))
                                         .text_color(rgb(text_emphasized()))
@@ -4012,6 +4762,9 @@ impl FileManager {
                                 .when(!highlighted, |row| {
                                     row.text_color(rgb(theme_text()))
                                         .hover(|style| style.bg(rgb(surface_elevated())))
+                                })
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
                                 })
                                 .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                                     this.select_from_click(index, event, cx);
@@ -4037,7 +4790,12 @@ impl FileManager {
                                         .text_xs()
                                         .text_color(rgb(text_muted()))
                                         .child(entry.original_path.display().to_string()),
-                                )
+                                );
+                            div()
+                                .w_full()
+                                .h(px(TRASH_ROW_HEIGHT))
+                                .px_2()
+                                .child(row)
                         })
                         .collect()
                 }),
@@ -4098,7 +4856,18 @@ impl FileManager {
                     .child(div().w(px(142.0)).flex_none().child("DELETED"))
                     .child(div().w(px(280.0)).flex_none().child("ORIGINAL LOCATION")),
             )
-            .child(body)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.begin_rubber_band(event, cx);
+                        }),
+                    )
+                    .child(body),
+            )
             .into_any_element()
     }
 
@@ -4108,10 +4877,26 @@ impl FileManager {
             return self.render_trash_list(cx);
         }
         let selection = self.selection.clone();
+        let rubber_band = match &self.pointer_interaction {
+            PointerInteraction::RubberBand(state) => Some(state.clone()),
+            _ => None,
+        };
+        let active_row_payload = match &self.pointer_interaction {
+            PointerInteraction::RowArmed(press) => Some((press.index, press.payload.clone())),
+            PointerInteraction::FileDrag(drag) => {
+                Some((drag.press.index, drag.press.payload.clone()))
+            }
+            _ => None,
+        };
         let entries = Arc::new(self.snapshot.entries.clone());
+        let selected_paths = Arc::new(selection.effective_paths(&entries));
         let count = entries.len();
+        if count == 0 {
+            self.rendered_file_range = 0..0;
+        }
         let git_status_enabled = self.git_status_enabled;
         let sort = self.tab.sort;
+        let operation_running = self.operation_running;
         let body = if count == 0 {
             let title = if self.loading {
                 "Opening folder…"
@@ -4131,8 +4916,9 @@ impl FileManager {
                 .flex_col()
                 .items_center()
                 .justify_center()
+                .mt_8()
                 .gap_2()
-                .child(img("icons/empty-state.svg").size(px(184.0)))
+                .child(img("icons/empty-state.svg").size(px(280.0)))
                 .child(
                     div()
                         .mt_2()
@@ -4154,16 +4940,40 @@ impl FileManager {
             uniform_list(
                 "file-list",
                 count,
-                cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
+                cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                    this.rendered_file_range = range.clone();
                     range
                         .map(|index| {
                             let entry = entries[index].clone();
                             let open_entry = entry.clone();
-                            let highlighted = selection.is_highlighted(index, &entry);
+                            let highlighted = rubber_band.as_ref().map_or_else(
+                                || selection.is_highlighted(index, &entry),
+                                |state| rubber_highlighted(state, index, &entry),
+                            );
+                            let drag_paths = if selection.is_highlighted(index, &entry) {
+                                selected_paths.as_ref().clone()
+                            } else {
+                                vec![entry.path.clone()]
+                            };
+                            let drag_payload = active_row_payload
+                                .as_ref()
+                                .filter(|(active_index, _)| *active_index == index)
+                                .map(|(_, payload)| payload.clone())
+                                .unwrap_or_else(|| {
+                                    FileDragPayload::new(
+                                        drag_paths,
+                                        entry.name.clone(),
+                                        file_icon_asset(&entry),
+                                    )
+                                });
+                            let arm_payload = drag_payload.clone();
+                            let is_drop_directory = entry.kind == FileKind::Directory
+                                || (entry.kind == FileKind::Symlink && entry.path.is_dir());
+                            let drop_target = DropTarget::Directory(entry.path.clone());
                             let row = div()
                                 .id(("entry", index))
                                 .w_full()
-                                .h(px(36.0))
+                                .h(px(FILE_ROW_HEIGHT))
                                 .px_2()
                                 .rounded_md()
                                 .flex()
@@ -4180,6 +4990,14 @@ impl FileManager {
                                         .text_color(rgb(theme_text()))
                                         .hover(|style| style.bg(rgb(surface_elevated())))
                                 })
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                        this.arm_row_drag(index, arm_payload.clone(), event);
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }),
+                                )
                                 .on_mouse_down(
                                     MouseButton::Right,
                                     cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -4204,6 +5022,107 @@ impl FileManager {
                                         this.open_index(index, cx);
                                     }
                                 }))
+                                .when(!operation_running, |row| {
+                                    row.on_drag(
+                                        drag_payload,
+                                        |payload, cursor_offset, _, cx| {
+                                            cx.new(|_| DragGhost {
+                                                payload: payload.clone(),
+                                                cursor_offset,
+                                            })
+                                        },
+                                    )
+                                })
+                                .when(is_drop_directory, |row| {
+                                    let predicate_target = drop_target.clone();
+                                    let internal_move_target = drop_target.clone();
+                                    let external_move_target = drop_target.clone();
+                                    let internal_drop_target = drop_target.clone();
+                                    let external_drop_target = drop_target.clone();
+                                    row.can_drop(move |value, _, _| {
+                                        can_drop_value(
+                                            value,
+                                            &predicate_target,
+                                            operation_running,
+                                        )
+                                    })
+                                    .drag_over::<FileDragPayload>(|style, _, _, _| {
+                                        style
+                                            .bg(rgb(accent_background()))
+                                            .border_1()
+                                            .border_color(rgb(accent()))
+                                    })
+                                    .drag_over::<ExternalPaths>(|style, _, _, _| {
+                                        style
+                                            .bg(rgb(accent_background()))
+                                            .border_1()
+                                            .border_color(rgb(accent()))
+                                    })
+                                    .on_drag_move::<FileDragPayload>(cx.listener(
+                                        move |this, event, window, cx| {
+                                            this.update_internal_drop_cursor(
+                                                event,
+                                                &internal_move_target,
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                    .on_drag_move::<ExternalPaths>(cx.listener(
+                                        move |this, event, window, cx| {
+                                            this.update_external_drop_cursor(
+                                                event,
+                                                &external_move_target,
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                    .on_drop(cx.listener(
+                                        move |this, payload: &FileDragPayload, window, cx| {
+                                            this.perform_internal_drop(
+                                                payload,
+                                                internal_drop_target.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                    .on_drop(cx.listener(
+                                        move |this, paths: &ExternalPaths, _, cx| {
+                                            this.perform_external_drop(
+                                                paths,
+                                                external_drop_target.clone(),
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                })
+                                .when(!is_drop_directory, |row| {
+                                    row.can_drop(|_, _, _| false)
+                                        .on_drag_move::<FileDragPayload>(
+                                            |event, window, cx| {
+                                                if event.bounds.contains(&event.event.position)
+                                                    && event.drag(cx).visual.lifted()
+                                                {
+                                                    cx.set_active_drag_cursor_style(
+                                                        CursorStyle::OperationNotAllowed,
+                                                        window,
+                                                    );
+                                                }
+                                            },
+                                        )
+                                        .on_drag_move::<ExternalPaths>(|event, window, cx| {
+                                            if event.bounds.contains(&event.event.position) {
+                                                cx.set_active_drag_cursor_style(
+                                                    CursorStyle::OperationNotAllowed,
+                                                    window,
+                                                );
+                                            }
+                                        })
+                                        .on_drop(|_: &FileDragPayload, _, _| {})
+                                        .on_drop(|_: &ExternalPaths, _, _| {})
+                                })
                                 .child(file_icon(&entry))
                                 .child(
                                     div()
@@ -4239,7 +5158,11 @@ impl FileManager {
                                         .text_color(rgb(text_muted()))
                                         .child(modified_label(&entry)),
                                 );
-                            div().w_full().h(px(36.0)).px_2().child(row)
+                            div()
+                                .w_full()
+                                .h(px(FILE_ROW_HEIGHT))
+                                .px_2()
+                                .child(row)
                         })
                         .collect()
                 }),
@@ -4320,10 +5243,36 @@ impl FileManager {
                             .child(sort_label("MODIFIED", SortField::Modified, sort)),
                     ),
             )
-            .child(
+            .child({
+                let background_target = DropTarget::Directory(self.tab.path.clone());
+                let predicate_target = background_target.clone();
+                let move_target = background_target.clone();
+                let drop_target = background_target;
                 div()
                     .flex_1()
                     .min_h_0()
+                    .can_drop(move |value, _, _| {
+                        value.downcast_ref::<ExternalPaths>().is_some_and(|paths| {
+                            can_external_drop_value(paths, &predicate_target, operation_running)
+                        })
+                    })
+                    .drag_over::<ExternalPaths>(|style, _, _, _| {
+                        style.bg(Hsla::from(rgb(accent_background())).opacity(0.24))
+                    })
+                    .on_drag_move::<ExternalPaths>(cx.listener(
+                        move |this, event, window, cx| {
+                            this.update_external_drop_cursor(event, &move_target, window, cx);
+                        },
+                    ))
+                    .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+                        this.perform_external_drop(paths, drop_target.clone(), cx);
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.begin_rubber_band(event, cx);
+                        }),
+                    )
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -4331,8 +5280,8 @@ impl FileManager {
                             this.open_empty_space_menu(event.position, cx);
                         }),
                     )
-                    .child(body),
-            )
+                    .child(body)
+            })
             .into_any_element()
     }
 
@@ -4372,6 +5321,43 @@ impl FileManager {
                     .child("PREVIEW"),
             )
             .child(content)
+            .into_any_element()
+    }
+
+    fn render_rubber_band(&self) -> AnyElement {
+        let PointerInteraction::RubberBand(state) = &self.pointer_interaction else {
+            return div().into_any_element();
+        };
+        if !state.crossed_threshold {
+            return div().into_any_element();
+        }
+        let (viewport, _) = self.file_list_metrics();
+        let viewport_left = f32::from(viewport.left());
+        let viewport_right = f32::from(viewport.right());
+        let viewport_top = f32::from(viewport.top());
+        let viewport_bottom = f32::from(viewport.bottom());
+        let left = f32::from(state.origin.x)
+            .min(f32::from(state.current.x))
+            .clamp(viewport_left, viewport_right);
+        let right = f32::from(state.origin.x)
+            .max(f32::from(state.current.x))
+            .clamp(viewport_left, viewport_right);
+        let top = f32::from(state.origin.y)
+            .min(f32::from(state.current.y))
+            .clamp(viewport_top, viewport_bottom);
+        let bottom = f32::from(state.origin.y)
+            .max(f32::from(state.current.y))
+            .clamp(viewport_top, viewport_bottom);
+        div()
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px((right - left).max(1.0)))
+            .h(px((bottom - top).max(1.0)))
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(accent()))
+            .bg(Hsla::from(rgb(accent())).opacity(0.12))
             .into_any_element()
     }
 
@@ -4490,7 +5476,9 @@ impl Render for FileManager {
             .id("gnil-root")
             .relative()
             .key_context(
-                if self.action_menu.is_some()
+                if !matches!(&self.pointer_interaction, PointerInteraction::Idle) {
+                    "PointerInteraction"
+                } else if self.action_menu.is_some()
                     || self.empty_space_menu.is_some()
                     || self.appearance_menu_open
                 {
@@ -4545,6 +5533,7 @@ impl Render for FileManager {
             .on_action(cx.listener(Self::create_file))
             .on_action(cx.listener(Self::restore_trash_selected))
             .on_action(cx.listener(Self::empty_trash))
+            .on_action(cx.listener(Self::cancel_pointer_interaction))
             .on_action(cx.listener(Self::activate_path_input))
             .on_action(cx.listener(Self::submit_path_input))
             .on_action(cx.listener(Self::dismiss_path_input))
@@ -4556,12 +5545,29 @@ impl Render for FileManager {
             .on_action(cx.listener(|this, _: &SelectAllEntries, _, cx| {
                 this.select_all_entries(cx);
             }))
+            .on_mouse_move(cx.listener(Self::handle_pointer_move))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(Self::finish_pointer_interaction),
+            )
+            .on_drag_move::<FileDragPayload>(cx.listener(Self::handle_file_drag_move))
+            .on_drag_move::<ExternalPaths>(|_, window, cx| {
+                cx.set_active_drag_cursor_style(CursorStyle::OperationNotAllowed, window);
+            })
+            .on_modifiers_changed(cx.listener(Self::handle_drag_modifiers))
             .size_full()
             .flex()
             .bg(rgb(background()))
             .text_color(rgb(text_emphasized()))
             .font_family("Noto Sans")
             .child(self.render_workspace(cx))
+            .when(
+                matches!(
+                    &self.pointer_interaction,
+                    PointerInteraction::RubberBand(state) if state.crossed_threshold
+                ),
+                |root| root.child(self.render_rubber_band()),
+            )
             .when(
                 self.action_menu.is_some()
                     || self.empty_space_menu.is_some()
@@ -4579,6 +5585,73 @@ impl Render for FileManager {
                 |root| root.child(self.render_context_action_menu(cx)),
             )
     }
+}
+
+fn sanitized_external_paths(paths: &ExternalPaths) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    paths
+        .paths()
+        .iter()
+        .filter(|path| std::fs::symlink_metadata(path).is_ok())
+        .filter(|path| seen.insert((*path).clone()))
+        .cloned()
+        .collect()
+}
+
+fn can_internal_drop_value(
+    payload: &FileDragPayload,
+    target: &DropTarget,
+    operation_running: bool,
+) -> bool {
+    if !payload.visual.lifted()
+        || internal_drop_intent(
+            payload,
+            target,
+            payload.visual.copy(),
+            operation_running,
+        )
+        .is_err()
+    {
+        return false;
+    }
+    match target {
+        DropTarget::Directory(destination) => std::fs::canonicalize(destination).is_ok_and(
+            |canonical_destination| {
+                !payload.paths.iter().any(|path| {
+                    path.parent()
+                        .and_then(|parent| std::fs::canonicalize(parent).ok())
+                        .is_some_and(|parent| parent == canonical_destination)
+                }) && gnil_fs::validate_transfer_destination(&payload.paths, destination).is_ok()
+            },
+        ),
+        DropTarget::Trash => true,
+    }
+}
+
+fn can_external_drop_value(
+    external: &ExternalPaths,
+    target: &DropTarget,
+    operation_running: bool,
+) -> bool {
+    let paths = sanitized_external_paths(external);
+    if external_drop_intent(&paths, target, operation_running).is_err() {
+        return false;
+    }
+    match target {
+        DropTarget::Directory(destination) => {
+            gnil_fs::validate_transfer_destination(&paths, destination).is_ok()
+        }
+        DropTarget::Trash => false,
+    }
+}
+
+fn can_drop_value(value: &dyn std::any::Any, target: &DropTarget, operation_running: bool) -> bool {
+    value
+        .downcast_ref::<FileDragPayload>()
+        .is_some_and(|payload| can_internal_drop_value(payload, target, operation_running))
+        || value
+            .downcast_ref::<ExternalPaths>()
+            .is_some_and(|paths| can_external_drop_value(paths, target, operation_running))
 }
 
 fn preview_content(path: &Path, preview: &PreviewResult) -> AnyElement {
@@ -4714,6 +5787,8 @@ fn places() -> Vec<(String, PathBuf)> {
         ("Documents", dirs::document_dir()),
         ("Downloads", dirs::download_dir()),
         ("Pictures", dirs::picture_dir()),
+        ("Music", dirs::audio_dir()),
+        ("Videos", dirs::video_dir()),
     ] {
         if let Some(path) = path.filter(|path| path.exists()) {
             places.push((label.into(), path));
@@ -5405,7 +6480,15 @@ fn file_icon(entry: &FileEntry) -> AnyElement {
 fn file_icon_asset(entry: &FileEntry) -> &'static str {
     match entry.kind {
         FileKind::Directory if entry.metadata.readonly => "icons/folder-readonly.svg",
-        FileKind::Directory => "icons/folder-closed.svg",
+        FileKind::Directory => match entry.name.to_ascii_lowercase().as_str() {
+            "downloads" => "icons/folder-downloads.svg",
+            "pictures" | "images" | "photos" => "icons/folder-pictures.svg",
+            "documents" | "docs" => "icons/folder-documents.svg",
+            "videos" | "movies" => "icons/folder-videos.svg",
+            "music" | "audio" => "icons/folder-music.svg",
+            "desktop" => "icons/folder-desktop.svg",
+            _ => "icons/folder-closed.svg",
+        },
         FileKind::Symlink if entry.path.is_dir() => "icons/folder-symlink.svg",
         FileKind::File | FileKind::Symlink => match entry
             .extension()
@@ -5573,6 +6656,11 @@ fn main() {
                 KeyBinding::new("right", MenuOpenSubmenu, Some("ActionMenu")),
                 KeyBinding::new("left", MenuCloseSubmenu, Some("ActionMenu")),
                 KeyBinding::new("escape", DismissMenu, Some("ActionMenu")),
+                KeyBinding::new(
+                    "escape",
+                    CancelPointerInteraction,
+                    Some("PointerInteraction"),
+                ),
                 KeyBinding::new("enter", SubmitPathInput, Some("PathInput")),
                 KeyBinding::new("escape", DismissPathInput, Some("PathInput")),
                 KeyBinding::new("tab", CompletePathNext, Some("PathInput")),

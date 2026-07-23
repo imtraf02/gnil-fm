@@ -1,4 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Folder application icon">
-  <path fill="#8ca894" stroke="#172019" stroke-width="10" stroke-linejoin="miter" d="M17 35h43l13 14h38v38H17V35Z"/>
-  <path fill="#8ca894" stroke="#172019" stroke-width="10" stroke-linejoin="miter" d="M18 53h99l-15 52H10l8-52Z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="gnil-fm application mark">
+  <path fill="#8ca894" stroke="#172019" stroke-width="8" stroke-linejoin="round" d="M16 32h40l16 16h40v40H16V32Z"/>
+  <path fill="#8ca894" stroke="#172019" stroke-width="8" stroke-linejoin="round" d="M56 24h32v24H56V24Z"/>
+  <path fill="#172019" stroke="#172019" stroke-width="8" stroke-linejoin="round" d="M16 56h96l-16 48H12l4-48Z"/>
 </svg>

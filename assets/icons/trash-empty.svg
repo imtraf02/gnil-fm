@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 340 326"
+     width="340"
+     height="326"
+     fill="none"
+     role="img"
+     aria-labelledby="title desc">
+  <title id="title">Trash is empty illustration</title>
+  <desc id="desc">A minimal empty trash illustration with a zero bubble, sparkle, dotted path, and small floating decorations.</desc>
+
+  <!-- Soft background shapes -->
+  <rect x="19" y="1" width="301" height="61" rx="30.5" fill="#EEF1F3"/>
+  <rect x="19" y="127" width="301" height="63" rx="31.5" fill="#EEF1F3"/>
+  <rect x="19" y="258" width="301" height="59" rx="29.5" fill="#EEF1F3"/>
+
+  <!-- Count bubble -->
+  <path d="M84 57
+           C84 35.5 101.5 18 123 18
+           H160
+           C181.5 18 199 35.5 199 57
+           V63
+           C199 82.2 185.1 98.1 166.8 101.3
+           L164.4 109.5
+           C163.4 113 159 114.1 156.5 111.4
+           L146.9 101.8
+           H123
+           C101.5 101.8 84 84.3 84 62.8
+           Z"
+        fill="#E0E5E9"
+        stroke="#AEB8C0"
+        stroke-width="1.4"/>
+
+  <text x="141.5" y="80"
+        text-anchor="middle"
+        font-family="Inter, system-ui, sans-serif"
+        font-size="55"
+        font-weight="600"
+        fill="#B8C3CB">0</text>
+
+  <!-- Trash lid -->
+  <rect x="93" y="121" width="152" height="17" rx="8.5"
+        fill="#DDE4E9"
+        stroke="#AEB8C0"
+        stroke-width="1.5"/>
+  <rect x="141" y="111" width="56" height="11" rx="5.5"
+        fill="#DDE4E9"
+        stroke="#AEB8C0"
+        stroke-width="1.5"/>
+
+  <!-- Trash can back / opening -->
+  <path d="M108 138
+           H230
+           L220 270
+           H118
+           Z"
+        fill="#D9E1E7"
+        stroke="#AEB8C0"
+        stroke-width="1.5"
+        stroke-linejoin="round"/>
+
+  <!-- Inner panel -->
+  <path d="M172 138
+           H230
+           L220 270
+           H176
+           C171 270 167 266 166 261
+           L156 177
+           C153 157 160 142 172 138 Z"
+        fill="#C9D2D9"/>
+
+  <!-- Front body -->
+  <path d="M104 156
+           H234
+           C239 156 243 160 242.5 165
+           L230 289
+           C229.2 296 223.4 301 216.4 301
+           H121.6
+           C114.6 301 108.8 296 108 289
+           L95.5 165
+           C95 160 99 156 104 156 Z"
+        fill="#E1E6EA"
+        stroke="#AEB8C0"
+        stroke-width="1.5"
+        stroke-linejoin="round"/>
+
+  <!-- Vertical lines -->
+  <path d="M135 174 L143 282
+           M170 174 L170 286
+           M205 174 L197 282"
+        stroke="#C0CAD1"
+        stroke-width="4"
+        stroke-linecap="round"/>
+
+  <!-- Face -->
+  <circle cx="145" cy="225" r="8.5" fill="#BBC5CD"/>
+  <circle cx="187" cy="225" r="8.5" fill="#BBC5CD"/>
+  <path d="M150 262
+           C154 252 163 246 171 246
+           C179 246 188 252 192 262"
+        stroke="#B5C0C8"
+        stroke-width="5"
+        stroke-linecap="round"/>
+
+  <!-- Dotted flight path -->
+  <path d="M182 208
+           C182 169 189 132 212 103
+           C226 86 244 74 262 69"
+        stroke="#AEB8C0"
+        stroke-width="1.35"
+        stroke-linecap="round"
+        stroke-dasharray="4 5"/>
+
+  <!-- Loop -->
+  <path d="M210 104
+           C221 91 239 92 244 104
+           C249 116 237 126 225 122
+           C214 118 210 111 210 104 Z"
+        stroke="#AEB8C0"
+        stroke-width="1.15"
+        stroke-dasharray="3.5 4.5"/>
+
+  <!-- Sparkle -->
+  <path d="M257 34
+           L261 43
+           L270 47
+           L261 51
+           L257 60
+           L253 51
+           L244 47
+           L253 43
+           Z"
+        fill="#DCE2E6"
+        stroke="#AEB8C0"
+        stroke-width="1.2"
+        stroke-linejoin="round"/>
+
+  <!-- Tiny check inside -->
+  <path d="M209 192
+           L218 201
+           L232 186"
+        stroke="#B8C2CA"
+        stroke-width="3"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+
+  <!-- Floating circles -->
+  <circle cx="54" cy="91" r="4.5" stroke="#AEB8C0" stroke-width="1.2"/>
+  <circle cx="281" cy="96" r="10" stroke="#AEB8C0" stroke-width="1.2"/>
+  <circle cx="46" cy="251" r="5.5" stroke="#AEB8C0" stroke-width="1.2"/>
+  <circle cx="287" cy="160" r="3.2" stroke="#AEB8C0" stroke-width="1.1"/>
+</svg>

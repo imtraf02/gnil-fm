@@ -20,7 +20,7 @@ pub use operation::{
     FileFingerprint, FsOperation, OperationOutcome, PermissionChange, PermissionUndo, RenamePair,
     TrashEntryRef, UndoKind, UndoRecord,
 };
-pub use selection::SelectionState;
+pub use selection::{SelectionMerge, SelectionState};
 pub use settings::{AppSettings, ConfigPaths, KeymapProfile, ThemeMode};
 pub use tab::{TabLocation, TabRoot, TabState};
 pub use theme::{
