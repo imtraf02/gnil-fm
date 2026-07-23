@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn parses_open_options_and_selects_filter() {
-        let filters = vec![(
+        let filters: Vec<SerializedFilter> = vec![(
             "Images".to_owned(),
             vec![(0, "*.[pP][nN][gG]".to_owned()), (1, "image/*".to_owned())],
         )];
