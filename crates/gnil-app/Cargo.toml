@@ -26,7 +26,10 @@ regex.workspace = true
 unicode-segmentation.workspace = true
 url.workspace = true
 zbus.workspace = true
-lucide-icons = "1.25"
+lucide-icons = "=1.25.0"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

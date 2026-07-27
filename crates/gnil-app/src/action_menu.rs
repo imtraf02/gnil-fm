@@ -93,9 +93,12 @@ impl MenuContext {
         Self {
             selected_count: selected_paths.len(),
             permissions_supported: !selected_entries.is_empty()
-                && selected_entries
-                    .iter()
-                    .all(|entry| entry.kind != FileKind::Symlink && entry.metadata.mode.is_some()),
+                && selected_entries.iter().all(|entry| {
+                    entry.kind != FileKind::Symlink
+                        && entry
+                            .metadata()
+                            .is_some_and(|metadata| metadata.mode.is_some())
+                }),
             clipboard_valid,
             operation_running,
             all_selected_archives: !selected_entries.is_empty()
@@ -258,13 +261,10 @@ pub(crate) fn prepare_context_selection(
     let Some(entry) = entries.get(index) else {
         return false;
     };
-    let effective = selection.effective_paths(entries);
-    if effective.len() > 1 && effective.iter().any(|path| path == &entry.path) {
+    if selection.selected_count() > 1 && selection.contains_path(&entry.path) {
         return false;
     }
-    let changed = effective.as_slice() != [entry.path.clone()];
-    selection.select_only(index, entries);
-    changed
+    selection.select_only(index, entries)
 }
 
 fn action(
@@ -305,7 +305,7 @@ fn is_selectable(entry: &MenuEntry) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use gnil_core::{FileMetadata, SelectionState};
+    use gnil_core::{EntryMetadata, FileMetadata, SelectionState};
     use gpui::{point, px};
 
     use super::*;
@@ -324,10 +324,10 @@ mod tests {
             name: name.into(),
             kind,
             hidden: false,
-            metadata: FileMetadata {
+            metadata: EntryMetadata::Ready(FileMetadata {
                 mode,
                 ..FileMetadata::default()
-            },
+            }),
             git_status: None,
         }
     }

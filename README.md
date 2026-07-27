@@ -27,7 +27,8 @@ cargo run -p gnil-fm -- ~/Downloads
 ```
 
 The UI targets native Wayland. GPU, fontconfig, FreeType and xkbcommon libraries are supplied by the
-Nix shell.
+Nix shell. Set `GNIL_PERF_TRACE=1` when launching the app to print one-second summaries of surface
+render cost and coalesced pointer latency.
 
 ## Keyboard
 

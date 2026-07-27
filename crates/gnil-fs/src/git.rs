@@ -15,13 +15,7 @@ pub struct GitStatusSnapshot {
 impl GitStatusSnapshot {
     #[must_use]
     pub fn status_for_path(&self, path: &Path) -> Option<GitStatus> {
-        self.entries.get(path).copied().or_else(|| {
-            self.entries
-                .iter()
-                .filter(|(changed, _)| changed.starts_with(path))
-                .map(|(_, status)| *status)
-                .max_by_key(|status| git_severity(*status))
-        })
+        self.entries.get(path).copied()
     }
 }
 
@@ -55,14 +49,16 @@ pub fn scan_git_status(path: &Path) -> GitStatusSnapshot {
     }
     let root = PathBuf::from(String::from_utf8_lossy(&root_output.stdout).trim());
     let Ok(output) = Command::new("git")
+        .arg("-C")
+        .arg(&root)
         .args([
-            "-C",
-            &root.to_string_lossy(),
             "status",
             "--porcelain=v1",
             "-z",
-            "--untracked-files=all",
+            "--untracked-files=normal",
+            "--",
         ])
+        .arg(path.strip_prefix(&root).unwrap_or(path))
         .output()
     else {
         return GitStatusSnapshot {
@@ -85,10 +81,34 @@ pub fn scan_git_status(path: &Path) -> GitStatusSnapshot {
             code if code.contains(&b'D') => GitStatus::Deleted,
             _ => GitStatus::Modified,
         };
-        entries.insert(root.join(path.as_ref()), status);
+        let changed = root.join(path.as_ref());
+        insert_status(&mut entries, changed.as_path(), &root, status);
     }
     GitStatusSnapshot {
         root: Some(root),
         entries,
+    }
+}
+
+fn insert_status(
+    entries: &mut HashMap<PathBuf, GitStatus>,
+    changed: &Path,
+    root: &Path,
+    status: GitStatus,
+) {
+    let mut current = Some(changed);
+    while let Some(path) = current {
+        entries
+            .entry(path.to_path_buf())
+            .and_modify(|existing| {
+                if git_severity(status) > git_severity(*existing) {
+                    *existing = status;
+                }
+            })
+            .or_insert(status);
+        if path == root {
+            break;
+        }
+        current = path.parent().filter(|parent| parent.starts_with(root));
     }
 }

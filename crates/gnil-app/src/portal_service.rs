@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::mpsc, thread, time::Duration};
 
 use async_io::Timer;
 use futures_lite::future;
@@ -38,6 +33,7 @@ struct PortalRequestObject {
 #[interface(name = "org.freedesktop.impl.portal.Request")]
 impl PortalRequestObject {
     #[zbus(name = "Close")]
+    #[allow(clippy::unused_async)]
     async fn close(&self) {
         let _ = self.cancel.try_send(());
     }
@@ -52,6 +48,7 @@ enum StartupState {
 #[interface(name = "org.freedesktop.impl.portal.FileChooser")]
 impl FileChooserBackend {
     #[zbus(property(emits_changed_signal = "const"), name = "version")]
+    #[allow(clippy::unused_self)]
     fn version(&self) -> u32 {
         4
     }
@@ -161,7 +158,7 @@ impl FileChooserBackend {
         if self
             .ui
             .send(PickerUiCommand::Open {
-                request: request.clone(),
+                request: Box::new(request.clone()),
                 response: response_tx,
                 started: started_tx,
             })

@@ -53,7 +53,9 @@ pub fn validate_transfer_destination(
     destination: &Path,
 ) -> Result<(), OperationError> {
     if !fs::metadata(destination).is_ok_and(|metadata| metadata.is_dir()) {
-        return Err(OperationError::InvalidDestination(destination.to_path_buf()));
+        return Err(OperationError::InvalidDestination(
+            destination.to_path_buf(),
+        ));
     }
     for source in sources {
         fs::symlink_metadata(source)?;

@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, thread};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    thread,
+};
 
 use crossbeam_channel::{Receiver, TryRecvError, unbounded};
 use nix::sys::statvfs::statvfs;
@@ -8,7 +12,8 @@ use zbus::{
     blocking::{Connection, MessageIterator, Proxy},
     fdo::ManagedObjects,
     message::Type,
-    zvariant::{OwnedObjectPath, Value},
+    names::OwnedInterfaceName,
+    zvariant::{OwnedObjectPath, OwnedValue, Value},
 };
 
 const SERVICE: &str = "org.freedesktop.UDisks2";
@@ -57,8 +62,6 @@ impl DeviceMonitor {
         let connection = Connection::system()?;
         let rule = MatchRule::builder()
             .msg_type(Type::Signal)
-            .sender(SERVICE)
-            .map_err(|error| DeviceError::Monitor(error.to_string()))?
             .path_namespace(ROOT)
             .map_err(|error| DeviceError::Monitor(error.to_string()))?
             .build();
@@ -94,42 +97,47 @@ pub fn scan_devices() -> Result<Vec<DeviceEntry>, DeviceError> {
     let manager = Proxy::new(&connection, SERVICE, ROOT, OBJECT_MANAGER)?;
     let objects: ManagedObjects = manager.call("GetManagedObjects", &())?;
     let mut devices = Vec::new();
-    for (object_path, interfaces) in objects {
-        if !interfaces.keys().any(|name| name.as_str() == FILESYSTEM)
-            || !interfaces.keys().any(|name| name.as_str() == BLOCK)
-        {
+    for (object_path, interfaces) in &objects {
+        let Some(block) = interface_properties(interfaces, BLOCK) else {
+            continue;
+        };
+        let Some(filesystem) = interface_properties(interfaces, FILESYSTEM) else {
+            continue;
+        };
+        let id_usage = property::<String>(block, "IdUsage").unwrap_or_default();
+        let hint_ignore = property::<bool>(block, "HintIgnore").unwrap_or(true);
+        let mount_paths: Vec<_> = property::<Vec<Vec<u8>>>(filesystem, "MountPoints")
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|path| nul_terminated_path(path))
+            .collect();
+        if !should_include_volume(&id_usage, hint_ignore, &mount_paths) {
             continue;
         }
-        let path = object_path.as_str();
-        let block = Proxy::new(&connection, SERVICE, path, BLOCK)?;
-        let id_usage: String = block.get_property("IdUsage")?;
-        let hint_ignore: bool = block.get_property("HintIgnore")?;
-        if id_usage != "filesystem" || hint_ignore {
+
+        let Some(device) = property::<Vec<u8>>(block, "Device") else {
             continue;
-        }
-        let hint_system: bool = block.get_property("HintSystem")?;
-        let label: String = block.get_property("IdLabel")?;
-        let device: Vec<u8> = block.get_property("Device")?;
-        let block_size: u64 = block.get_property("Size")?;
-        let drive_path: OwnedObjectPath = block.get_property("Drive")?;
+        };
+        let Some(drive_path) = property::<OwnedObjectPath>(block, "Drive") else {
+            continue;
+        };
         if drive_path.as_str() == "/" {
             continue;
         }
-        let filesystem = Proxy::new(&connection, SERVICE, path, FILESYSTEM)?;
-        let mount_points: Vec<Vec<u8>> = filesystem.get_property("MountPoints")?;
-        let mount_path = mount_points
-            .first()
-            .and_then(|path| nul_terminated_path(path));
-
-        let drive = Proxy::new(&connection, SERVICE, drive_path.as_str(), DRIVE)?;
-        let removable: bool = drive.get_property("Removable")?;
-        let media_removable: bool = drive.get_property("MediaRemovable")?;
-        let can_eject: bool = drive.get_property("Ejectable")?;
-        let connection_bus: String = drive.get_property("ConnectionBus")?;
-        let rotation_rate: u32 = drive.get_property("RotationRate")?;
-        if hint_system && !removable && !media_removable && connection_bus != "usb" {
+        let Some(drive) = objects
+            .get(&drive_path)
+            .and_then(|interfaces| interface_properties(interfaces, DRIVE))
+        else {
             continue;
-        }
+        };
+
+        let removable = property::<bool>(drive, "Removable").unwrap_or(false);
+        let media_removable = property::<bool>(drive, "MediaRemovable").unwrap_or(false);
+        let can_eject = property::<bool>(drive, "Ejectable").unwrap_or(false);
+        let connection_bus = property::<String>(drive, "ConnectionBus").unwrap_or_default();
+        let rotation_rate = property::<u32>(drive, "RotationRate").unwrap_or(0);
+        let label = property::<String>(block, "IdLabel").unwrap_or_default();
+        let block_size = property::<u64>(block, "Size").unwrap_or(0);
         let device_path = nul_terminated_path(&device).unwrap_or_default();
         let display_label = if label.is_empty() {
             device_path
@@ -140,7 +148,8 @@ pub fn scan_devices() -> Result<Vec<DeviceEntry>, DeviceError> {
         } else {
             label
         };
-        let filesystem_size: u64 = filesystem.get_property("Size").unwrap_or(0);
+        let mount_path = mount_paths.first().cloned();
+        let filesystem_size = property::<u64>(filesystem, "Size").unwrap_or(0);
         let size = filesystem_size.max(block_size);
         let available = mount_path.as_ref().and_then(|mount| {
             statvfs(mount.as_path()).ok().map(|stats| {
@@ -150,7 +159,7 @@ pub fn scan_devices() -> Result<Vec<DeviceEntry>, DeviceError> {
             })
         });
         devices.push(DeviceEntry {
-            id: path.to_owned(),
+            id: object_path.as_str().to_owned(),
             drive_id: drive_path.as_str().to_owned(),
             label: display_label,
             device_path,
@@ -164,6 +173,41 @@ pub fn scan_devices() -> Result<Vec<DeviceEntry>, DeviceError> {
     }
     devices.sort_by_key(|device| device.label.to_lowercase());
     Ok(devices)
+}
+
+type Properties = HashMap<String, OwnedValue>;
+type Interfaces = HashMap<OwnedInterfaceName, Properties>;
+
+fn interface_properties<'a>(interfaces: &'a Interfaces, interface: &str) -> Option<&'a Properties> {
+    interfaces
+        .iter()
+        .find_map(|(name, properties)| (name.as_str() == interface).then_some(properties))
+}
+
+fn property<T>(properties: &Properties, name: &str) -> Option<T>
+where
+    T: TryFrom<OwnedValue>,
+{
+    properties
+        .get(name)?
+        .try_clone()
+        .ok()
+        .and_then(|value| T::try_from(value).ok())
+}
+
+fn should_include_volume(id_usage: &str, hint_ignore: bool, mount_paths: &[PathBuf]) -> bool {
+    id_usage == "filesystem"
+        && !hint_ignore
+        && !mount_paths
+            .iter()
+            .any(|mount_path| is_critical_system_mount(mount_path))
+}
+
+fn is_critical_system_mount(path: &Path) -> bool {
+    matches!(
+        path.to_str(),
+        Some("/" | "/boot" | "/boot/efi" | "/home" | "/nix" | "/nix/store" | "/usr" | "/var")
+    )
 }
 
 pub fn mount_device(object_path: &str) -> Result<PathBuf, DeviceError> {
@@ -231,5 +275,31 @@ mod tests {
             Some(PathBuf::from("/run/media/user/disk"))
         );
         assert_eq!(nul_terminated_path(b"\0"), None);
+    }
+
+    #[test]
+    fn includes_external_and_unmounted_internal_filesystems() {
+        assert!(should_include_volume("filesystem", false, &[]));
+        assert!(should_include_volume(
+            "filesystem",
+            false,
+            &[PathBuf::from("/run/media/user/USB")]
+        ));
+    }
+
+    #[test]
+    fn excludes_ignored_non_filesystem_and_critical_system_mounts() {
+        assert!(!should_include_volume("crypto", false, &[]));
+        assert!(!should_include_volume("filesystem", true, &[]));
+        assert!(!should_include_volume(
+            "filesystem",
+            false,
+            &[PathBuf::from("/")]
+        ));
+        assert!(!should_include_volume(
+            "filesystem",
+            false,
+            &[PathBuf::from("/home")]
+        ));
     }
 }

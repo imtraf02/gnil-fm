@@ -42,6 +42,7 @@ token!(
 token!(ACCENT_HOVER, accent_hover, ThemeColors::dark().accent_hover);
 token!(DANGER, danger, ThemeColors::dark().danger);
 token!(ERROR, error, ThemeColors::dark().error);
+token!(WARNING, warning, ThemeColors::dark().warning);
 token!(GIT_ADDED, git_added, ThemeColors::dark().git_added);
 token!(GIT_MODIFIED, git_modified, ThemeColors::dark().git_modified);
 token!(GIT_DELETED, git_deleted, ThemeColors::dark().git_deleted);
@@ -65,6 +66,7 @@ pub fn set_active(colors: ThemeColors) {
     ACCENT_HOVER.store(colors.accent_hover, Ordering::Relaxed);
     DANGER.store(colors.danger, Ordering::Relaxed);
     ERROR.store(colors.error, Ordering::Relaxed);
+    WARNING.store(colors.warning, Ordering::Relaxed);
     GIT_ADDED.store(colors.git_added, Ordering::Relaxed);
     GIT_MODIFIED.store(colors.git_modified, Ordering::Relaxed);
     GIT_DELETED.store(colors.git_deleted, Ordering::Relaxed);

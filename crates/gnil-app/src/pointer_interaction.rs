@@ -51,7 +51,7 @@ impl DragVisualState {
 
 #[derive(Clone, Debug)]
 pub(crate) struct FileDragPayload {
-    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) paths: Arc<[PathBuf]>,
     pub(crate) first_name: String,
     pub(crate) first_icon: &'static str,
     pub(crate) visual: Arc<DragVisualState>,
@@ -59,12 +59,12 @@ pub(crate) struct FileDragPayload {
 
 impl FileDragPayload {
     pub(crate) fn new(
-        paths: Vec<PathBuf>,
+        paths: impl Into<Arc<[PathBuf]>>,
         first_name: String,
         first_icon: &'static str,
     ) -> Self {
         Self {
-            paths,
+            paths: paths.into(),
             first_name,
             first_icon,
             visual: Arc::new(DragVisualState::default()),
@@ -77,7 +77,6 @@ pub(crate) struct RowPressState {
     pub(crate) origin: Point<Pixels>,
     pub(crate) index: usize,
     pub(crate) baseline: SelectionState,
-    pub(crate) modifiers: Modifiers,
     pub(crate) payload: FileDragPayload,
 }
 
@@ -92,6 +91,7 @@ pub(crate) struct RubberBandState {
     pub(crate) serial: u64,
     pub(crate) origin: Point<Pixels>,
     pub(crate) current: Point<Pixels>,
+    pub(crate) frame: RubberFrameGate,
     pub(crate) origin_content_y: f32,
     pub(crate) current_content_y: f32,
     pub(crate) baseline: SelectionState,
@@ -99,6 +99,39 @@ pub(crate) struct RubberBandState {
     pub(crate) crossed_threshold: bool,
     pub(crate) hit_span: Option<RangeInclusive<usize>>,
     pub(crate) autoscroll_scheduled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RubberFrameGate {
+    pending_position: Option<Point<Pixels>>,
+    scheduled: bool,
+}
+
+impl RubberFrameGate {
+    pub(crate) fn queue(&mut self, position: Point<Pixels>) -> bool {
+        self.pending_position = Some(position);
+        if self.scheduled {
+            false
+        } else {
+            self.scheduled = true;
+            true
+        }
+    }
+
+    pub(crate) fn take(&mut self) -> Option<Point<Pixels>> {
+        self.scheduled = false;
+        self.pending_position.take()
+    }
+
+    #[must_use]
+    pub(crate) fn pending_or(&self, fallback: Point<Pixels>) -> Point<Pixels> {
+        self.pending_position.unwrap_or(fallback)
+    }
+
+    #[must_use]
+    pub(crate) fn is_scheduled(&self) -> bool {
+        self.scheduled
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -149,6 +182,11 @@ pub(crate) fn movement_crossed_threshold(origin: Point<Pixels>, current: Point<P
 }
 
 #[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 pub(crate) fn band_span(
     origin_content_y: f32,
     current_content_y: f32,
@@ -186,11 +224,7 @@ pub(crate) fn endpoint_index(
 }
 
 #[must_use]
-pub(crate) fn rubber_highlighted(
-    state: &RubberBandState,
-    index: usize,
-    entry: &FileEntry,
-) -> bool {
+pub(crate) fn rubber_highlighted(state: &RubberBandState, index: usize, entry: &FileEntry) -> bool {
     if !state.crossed_threshold {
         return state.baseline.is_highlighted(index, entry);
     }
@@ -267,7 +301,7 @@ mod tests {
 
     fn payload(paths: &[&str]) -> FileDragPayload {
         FileDragPayload::new(
-            paths.iter().map(PathBuf::from).collect(),
+            paths.iter().map(PathBuf::from).collect::<Vec<_>>(),
             "notes.txt".into(),
             "icons/file-generic.svg",
         )
@@ -283,6 +317,20 @@ mod tests {
             point(px(0.0), px(0.0)),
             point(px(3.0), px(4.0))
         ));
+    }
+
+    #[test]
+    fn rubber_frame_gate_coalesces_pointer_events() {
+        let mut gate = RubberFrameGate::default();
+        for index in 0..100 {
+            let coordinate = if index == 99 { 99.0 } else { 1.0 };
+            let scheduled = gate.queue(point(px(coordinate), px(coordinate)));
+            assert_eq!(scheduled, index == 0);
+        }
+
+        assert_eq!(gate.take(), Some(point(px(99.0), px(99.0))));
+        assert!(!gate.is_scheduled());
+        assert!(gate.queue(point(px(100.0), px(100.0))));
     }
 
     #[test]
@@ -353,6 +401,9 @@ mod tests {
 
     #[test]
     fn idle_is_the_default_interaction() {
-        assert!(matches!(PointerInteraction::default(), PointerInteraction::Idle));
+        assert!(matches!(
+            PointerInteraction::default(),
+            PointerInteraction::Idle
+        ));
     }
 }

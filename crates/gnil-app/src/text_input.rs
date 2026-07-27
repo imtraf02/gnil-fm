@@ -5,7 +5,7 @@ use gpui::{
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
-    fill, hsla, point, prelude::*, px, relative, rgb, rgba, size,
+    fill, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -73,11 +73,13 @@ impl TextInput {
         }
     }
 
+    #[must_use]
     pub fn with_key_context(mut self, key_context: &'static str) -> Self {
         self.key_context = key_context;
         self
     }
 
+    #[must_use]
     pub fn text(&self) -> &str {
         &self.content
     }
@@ -452,7 +454,10 @@ impl Element for TextElement {
         let cursor = input.cursor_offset();
         let style = window.text_style();
         let (display, color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 1., 0.34))
+            (
+                input.placeholder.clone(),
+                gpui::Hsla::from(rgb(theme_runtime::text_muted())),
+            )
         } else {
             (content, style.color)
         };

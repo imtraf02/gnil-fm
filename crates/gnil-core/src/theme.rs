@@ -307,6 +307,29 @@ fn parse_hex_color(field: &str, value: &str) -> Result<u32, String> {
 mod tests {
     use super::*;
 
+    fn relative_luminance(color: u32) -> f64 {
+        let channel = |shift: u32| {
+            let value = f64::from((color >> shift) & 0xff_u32) / 255.0;
+            if value <= 0.040_45 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+
+    fn contrast_ratio(foreground: u32, background: u32) -> f64 {
+        let foreground = relative_luminance(foreground);
+        let background = relative_luminance(background);
+        let (lighter, darker) = if foreground > background {
+            (foreground, background)
+        } else {
+            (background, foreground)
+        };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
     #[test]
     fn custom_theme_merges_with_appearance_defaults() {
         let root = tempfile::tempdir().unwrap();
@@ -347,5 +370,19 @@ mod tests {
         assert_eq!(theme.schema_version, 1);
         assert_eq!(theme.name, "Forest Night");
         assert_eq!(theme.appearance, ThemeAppearance::Dark);
+    }
+
+    #[test]
+    fn builtin_text_tokens_meet_wcag_aa() {
+        for theme in [ThemeColors::light(), ThemeColors::dark()] {
+            for foreground in [theme.text, theme.text_emphasized] {
+                for background in [theme.background, theme.surface] {
+                    assert!(
+                        contrast_ratio(foreground, background) >= 4.5,
+                        "#{foreground:06x} on #{background:06x}"
+                    );
+                }
+            }
+        }
     }
 }

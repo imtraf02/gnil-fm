@@ -1,4 +1,6 @@
 use std::{
+    cmp::{Ordering as CmpOrdering, Reverse},
+    collections::BinaryHeap,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -28,12 +30,41 @@ pub struct SearchHit {
     pub score: i64,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct RankedHit(SearchHit);
+
+impl Ord for RankedHit {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        self.0
+            .score
+            .cmp(&other.0.score)
+            .then_with(|| {
+                other
+                    .0
+                    .path
+                    .as_os_str()
+                    .len()
+                    .cmp(&self.0.path.as_os_str().len())
+            })
+            .then_with(|| other.0.path.cmp(&self.0.path))
+    }
+}
+
+impl PartialOrd for RankedHit {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
 pub fn search_paths(
     root: &Path,
     query: &str,
     options: SearchOptions,
     cancelled: &AtomicBool,
 ) -> Vec<SearchHit> {
+    if options.max_results == 0 {
+        return Vec::new();
+    }
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(!options.show_hidden)
@@ -42,7 +73,8 @@ pub fn search_paths(
         .git_exclude(options.respect_gitignore)
         .follow_links(false);
 
-    let mut hits = Vec::new();
+    let normalized_query = query.to_lowercase();
+    let mut hits = BinaryHeap::with_capacity(options.max_results + 1);
     for item in builder.build().filter_map(Result::ok) {
         if cancelled.load(Ordering::Relaxed) {
             break;
@@ -51,14 +83,21 @@ pub fn search_paths(
             continue;
         }
         let relative = item.path().strip_prefix(root).unwrap_or(item.path());
-        let candidate = relative.to_string_lossy();
-        if let Some(score) = fuzzy_match_score(&candidate, query) {
-            hits.push(SearchHit {
+        let candidate = relative.to_string_lossy().to_lowercase();
+        if let Some(score) = fuzzy_score_normalized(&candidate, &normalized_query) {
+            hits.push(Reverse(RankedHit(SearchHit {
                 path: item.into_path(),
                 score,
-            });
+            })));
+            if hits.len() > options.max_results {
+                hits.pop();
+            }
         }
     }
+    let mut hits: Vec<_> = hits
+        .into_iter()
+        .map(|Reverse(RankedHit(hit))| hit)
+        .collect();
     hits.sort_by(|left, right| {
         right.score.cmp(&left.score).then_with(|| {
             left.path
@@ -67,7 +106,6 @@ pub fn search_paths(
                 .cmp(&right.path.as_os_str().len())
         })
     });
-    hits.truncate(options.max_results);
     hits
 }
 
@@ -83,16 +121,14 @@ fn fuzzy_score_normalized(candidate: &str, query: &str) -> Option<i64> {
     let mut score = 0_i64;
     let mut query_chars = query.chars().peekable();
     let mut previous_match = None;
+    let mut previous_character = None;
     for (index, character) in candidate.chars().enumerate() {
         if query_chars
             .peek()
             .is_some_and(|expected| *expected == character)
         {
-            let boundary = index == 0
-                || candidate
-                    .chars()
-                    .nth(index.saturating_sub(1))
-                    .is_some_and(|previous| matches!(previous, '/' | '_' | '-' | ' '));
+            let boundary =
+                previous_character.is_none_or(|previous| matches!(previous, '/' | '_' | '-' | ' '));
             score += if boundary { 18 } else { 8 };
             if previous_match == Some(index.saturating_sub(1)) {
                 score += 12;
@@ -100,6 +136,7 @@ fn fuzzy_score_normalized(candidate: &str, query: &str) -> Option<i64> {
             previous_match = Some(index);
             query_chars.next();
         }
+        previous_character = Some(character);
     }
     query_chars
         .peek()
@@ -137,5 +174,24 @@ mod tests {
     fn fuzzy_match_is_case_insensitive() {
         assert!(fuzzy_match_score("SourceTree", "st").is_some());
         assert!(fuzzy_match_score("SourceTree", "zz").is_none());
+    }
+
+    #[test]
+    fn search_retains_only_the_best_requested_hits() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["file.rs", "far.rs", "folder.rs", "unrelated.txt"] {
+            fs::write(root.path().join(name), b"").unwrap();
+        }
+        let hits = search_paths(
+            root.path(),
+            "fr",
+            SearchOptions {
+                max_results: 2,
+                ..SearchOptions::default()
+            },
+            &AtomicBool::new(false),
+        );
+        assert_eq!(hits.len(), 2);
+        assert!(hits[0].score >= hits[1].score);
     }
 }

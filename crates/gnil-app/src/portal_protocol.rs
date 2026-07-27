@@ -117,7 +117,10 @@ impl PortalResponse {
                 choices,
                 current_filter,
             } => {
-                let Some(uris) = paths.iter().map(|path| file_uri(path)).collect::<Option<Vec<_>>>()
+                let Some(uris) = paths
+                    .iter()
+                    .map(|path| file_uri(path))
+                    .collect::<Option<Vec<_>>>()
                 else {
                     return Self::error();
                 };
@@ -128,7 +131,7 @@ impl PortalResponse {
                     code: 0,
                     uris,
                     choices,
-                    current_filter: current_filter.map(|filter| filter.serialize()),
+                    current_filter: current_filter.map(PortalFilter::serialize),
                 }
             }
             PickerOutcome::Cancelled => Self::cancelled(),
@@ -291,10 +294,7 @@ fn select_current_filter(
     }
 }
 
-fn parse_filter(
-    options: &PortalOptions,
-    key: &str,
-) -> Result<Option<PortalFilter>, OptionError> {
+fn parse_filter(options: &PortalOptions, key: &str) -> Result<Option<PortalFilter>, OptionError> {
     let raw: Option<SerializedFilter> = option(options, key)?;
     raw.map(filter_from_serialized).transpose()
 }
@@ -304,18 +304,15 @@ fn parse_filters(
     key: &str,
 ) -> Result<Option<Vec<PortalFilter>>, OptionError> {
     let raw: Option<Vec<SerializedFilter>> = option(options, key)?;
-    raw.map(|filters| {
-        filters
-            .into_iter()
-            .map(filter_from_serialized)
-            .collect()
-    })
-    .transpose()
+    raw.map(|filters| filters.into_iter().map(filter_from_serialized).collect())
+        .transpose()
 }
 
 fn filter_from_serialized(raw: SerializedFilter) -> Result<PortalFilter, OptionError> {
     if raw.0.is_empty() || raw.1.is_empty() {
-        return Err(OptionError::new("filters require a label and at least one rule"));
+        return Err(OptionError::new(
+            "filters require a label and at least one rule",
+        ));
     }
     let rules = raw
         .1
@@ -356,13 +353,17 @@ fn parse_choices(options: &PortalOptions) -> Result<Vec<PortalChoice>, OptionErr
         .into_iter()
         .map(|(id, label, values, initial)| {
             if id.is_empty() || label.is_empty() || !ids.insert(id.clone()) {
-                return Err(OptionError::new("choice IDs and labels must be non-empty and unique"));
+                return Err(OptionError::new(
+                    "choice IDs and labels must be non-empty and unique",
+                ));
             }
             if values
                 .iter()
                 .any(|(value_id, value_label)| value_id.is_empty() || value_label.is_empty())
             {
-                return Err(OptionError::new("choice option IDs and labels cannot be empty"));
+                return Err(OptionError::new(
+                    "choice option IDs and labels cannot be empty",
+                ));
             }
             let mut value_ids = HashSet::new();
             if values
@@ -408,7 +409,8 @@ fn decode_nul_path(bytes: &[u8]) -> Result<PathBuf, OptionError> {
 fn decode_nul_name(bytes: &[u8]) -> Result<OsString, OptionError> {
     let raw = decode_nul_bytes(bytes, "file name")?;
     let name = OsStr::from_bytes(raw);
-    if raw.is_empty() || raw.contains(&b'/') || name == OsStr::new(".") || name == OsStr::new("..") {
+    if raw.is_empty() || raw.contains(&b'/') || name == OsStr::new(".") || name == OsStr::new("..")
+    {
         return Err(OptionError::new("file names must be non-empty basenames"));
     }
     Ok(name.to_owned())
@@ -419,7 +421,9 @@ fn decode_nul_bytes<'a>(bytes: &'a [u8], label: &str) -> Result<&'a [u8], Option
         return Err(OptionError::new(format!("{label} must be NUL-terminated")));
     };
     if raw.contains(&0) {
-        return Err(OptionError::new(format!("{label} contains an embedded NUL")));
+        return Err(OptionError::new(format!(
+            "{label} contains an embedded NUL"
+        )));
     }
     Ok(raw)
 }
@@ -519,7 +523,10 @@ mod tests {
     fn decodes_non_utf8_paths_and_rejects_unsafe_names() {
         let mut bytes = b"/tmp/non-utf8-".to_vec();
         bytes.extend([0xff, 0]);
-        assert_eq!(decode_nul_path(&bytes).unwrap().as_os_str().as_bytes(), &bytes[..bytes.len() - 1]);
+        assert_eq!(
+            decode_nul_path(&bytes).unwrap().as_os_str().as_bytes(),
+            &bytes[..bytes.len() - 1]
+        );
         assert!(decode_nul_name(b"../escape\0").is_err());
         assert!(decode_nul_name(b"not-terminated").is_err());
     }
@@ -536,7 +543,10 @@ mod tests {
 
     #[test]
     fn normalizes_file_uris_and_wayland_parents() {
-        assert_eq!(file_uri(Path::new("/tmp/a b")), Some("file:///tmp/a%20b".into()));
+        assert_eq!(
+            file_uri(Path::new("/tmp/a b")),
+            Some("file:///tmp/a%20b".into())
+        );
         assert_eq!(file_uri(Path::new("relative/path")), None);
         assert_eq!(parent_handle("wayland:abc.123"), Some("abc.123"));
         assert_eq!(parent_handle("x11:123"), None);

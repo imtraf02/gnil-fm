@@ -199,9 +199,7 @@ pub fn extract_archives(
         if let Err(error) = check_cancelled(cancelled) {
             let rollback = rollback_committed(&committed);
             cleanup_staged(&staged);
-            if let Err(rollback_error) = rollback {
-                return Err(rollback_error);
-            }
+            rollback?;
             return Err(error);
         }
         match commit_keep_both(&output.staging_path, destination, &output.requested_name) {
@@ -209,9 +207,7 @@ pub fn extract_archives(
             Err(error) => {
                 let rollback = rollback_committed(&committed);
                 cleanup_staged(&staged);
-                if let Err(rollback_error) = rollback {
-                    return Err(rollback_error);
-                }
+                rollback?;
                 return Err(error);
             }
         }

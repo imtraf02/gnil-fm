@@ -11,17 +11,34 @@ recursive I/O.
 | `gnil-preview` | Bounded text, image, directory and metadata previews |
 | `gnil-app` | GPUI file-manager window plus the independent `gnil-fm-portal` picker service |
 
+The main binary is intentionally thin. File-manager behavior is grouped under
+`gnil-app/src/file_manager/` by loading, interaction, operation and view concerns. First-party Rust
+source files have a hard 2,000-line limit enforced by `nix flake check`; vendored GPUI sources are
+excluded.
+
+UI rendering is split further by surface: sidebar, header, appearance, menus, settings, operation
+sheets, lists and workspace. The portal picker follows the same loading/actions/view/footer split.
+Shared semantic icon, focus and overlay primitives live under `gnil-app/src/ui/`; project-specific
+UI changes must follow `.agents/skills/gnil-fm-ui-design/SKILL.md`. UI view modules have an enforced
+600-line limit even though the repository-wide safety limit is higher.
+
 ## Data flow
 
-1. Navigation advances a generation counter and submits a directory scan.
-2. The scan returns an immutable snapshot; stale generations are discarded.
-3. Selection launches a bounded preview request. A result is accepted only if its path still matches.
+1. Navigation advances a generation counter, cancels the previous request and submits a directory
+   scan.
+2. The scan emits a discovered snapshot containing names and kinds, then a complete snapshot with
+   metadata and Git status. Stale generations are discarded.
+3. Selection launches a bounded, cancellable preview request. Syntax resources are reused and
+   fingerprinted results may come from the bounded memory cache.
 4. Mutations run away from the render thread and return an optional undo record.
-5. The UI refreshes the current directory after a successful mutation.
+5. The non-recursive watcher coalesces bursts and refreshes the current directory after external or
+   successful local changes.
 
 `TaskScheduler` is available for longer foreground and background work. Jobs have explicit priority,
-cancellation and progress events. `DirectoryWatcher` wraps `notify` non-recursively; consumers should
-debounce bursts and request a fresh snapshot rather than patching UI rows from raw events.
+cancellation and progress events. `DirectoryWatcher` wraps `notify` non-recursively; the app polls it
+at a 100 ms debounce boundary and requests a fresh snapshot rather than patching UI rows from raw
+events. Directory snapshots are shared with render closures through `Arc`, so virtualized rendering
+does not clone all entries on every frame or perform filesystem I/O.
 
 ## Safety invariants
 

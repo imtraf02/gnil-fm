@@ -9,9 +9,9 @@
   <desc id="desc">A minimal empty folder with a zero bubble, spider web, dotted path, and small floating decorations.</desc>
 
   <!-- Soft background shapes -->
-  <rect x="19" y="1" width="301" height="61" rx="30.5" fill="#EEF1F3"/>
-  <rect x="19" y="127" width="301" height="63" rx="31.5" fill="#EEF1F3"/>
-  <rect x="19" y="258" width="301" height="59" rx="29.5" fill="#EEF1F3"/>
+  <rect x="19" y="1" width="301" height="61" rx="30.5" fill="#EDF2EE"/>
+  <rect x="19" y="127" width="301" height="63" rx="31.5" fill="#EDF2EE"/>
+  <rect x="19" y="258" width="301" height="59" rx="29.5" fill="#EDF2EE"/>
 
   <!-- Count bubble -->
   <path d="M84 57
@@ -26,8 +26,8 @@
            H123
            C101.5 101.8 84 84.3 84 62.8
            Z"
-        fill="#E0E5E9"
-        stroke="#AEB8C0"
+        fill="#DCE6DF"
+        stroke="#8CA894"
         stroke-width="1.4"/>
 
   <text x="141.5" y="80"
@@ -35,7 +35,7 @@
         font-family="Inter, system-ui, sans-serif"
         font-size="55"
         font-weight="600"
-        fill="#B8C3CB">0</text>
+        fill="#A8BCAF">0</text>
 
   <!-- Folder back -->
   <path d="M69 191
@@ -47,8 +47,8 @@
            L271.5 286.5
            H66.5
            Z"
-        fill="#DCE3E8"
-        stroke="#AEB8C0"
+        fill="#D6E2D9"
+        stroke="#8CA894"
         stroke-width="1.5"
         stroke-linejoin="round"/>
 
@@ -61,7 +61,7 @@
            C153.1 209.5 148.7 206.2 147.2 201.3
            L132.8 154.7
            C128.7 141.4 136.6 127.5 147 122.5 Z"
-        fill="#C9D2D9"/>
+        fill="#B9CBBE"/>
 
   <!-- Folder front -->
   <path d="M54.5 190.5
@@ -77,8 +77,8 @@
            H70.1
            C65.5 300.5 61.8 297 61.3 292.5
            Z"
-        fill="#E1E6EA"
-        stroke="#AEB8C0"
+        fill="#E2EAE4"
+        stroke="#8CA894"
         stroke-width="1.5"
         stroke-linejoin="round"/>
 
@@ -95,19 +95,19 @@
            C104 155 111 160 115 167
            M93 168
            C102 169 108.5 173 112 179"
-        stroke="#B8C2CA"
+        stroke="#A6B9AB"
         stroke-width="1.25"
         stroke-linecap="round"/>
 
   <!-- Face -->
-  <circle cx="95" cy="232" r="9" fill="#BBC5CD"/>
-  <circle cx="135" cy="232" r="9" fill="#BBC5CD"/>
+  <circle cx="95" cy="232" r="9" fill="#AEC0B3"/>
+  <circle cx="135" cy="232" r="9" fill="#AEC0B3"/>
   <path d="M104 275
            V265
            C104 257.8 109.8 252 117 252
            C124.2 252 130 257.8 130 265
            V275"
-        stroke="#B5C0C8"
+        stroke="#9CB2A2"
         stroke-width="6"
         stroke-linecap="butt"/>
 
@@ -115,7 +115,7 @@
   <path d="M189 207
            C187 167 193 129 214 99
            C226 82 242 71 260 67"
-        stroke="#AEB8C0"
+        stroke="#8CA894"
         stroke-width="1.35"
         stroke-linecap="round"
         stroke-dasharray="4 5"/>
@@ -125,7 +125,7 @@
            C220 89 239 91 243 103
            C247 114 235 124 224 120
            C214 117 210 109 210 101 Z"
-        stroke="#AEB8C0"
+        stroke="#8CA894"
         stroke-width="1.15"
         stroke-dasharray="3.5 4.5"/>
 
@@ -138,18 +138,18 @@
            C255 53 251 51 250 47
            L254 40
            Z"
-        fill="#DCE2E6"
-        stroke="#AEB8C0"
+        fill="#D7E3DA"
+        stroke="#8CA894"
         stroke-width="1.2"
         stroke-linejoin="round"/>
   <path d="M251.5 40 H272"
-        stroke="#B8C2CA"
+        stroke="#A6B9AB"
         stroke-width="1.1"
         stroke-linecap="round"/>
 
   <!-- Floating circles -->
-  <circle cx="54" cy="91" r="4.5" stroke="#AEB8C0" stroke-width="1.2"/>
-  <circle cx="281" cy="96" r="10" stroke="#AEB8C0" stroke-width="1.2"/>
-  <circle cx="46" cy="251" r="5.5" stroke="#AEB8C0" stroke-width="1.2"/>
-  <circle cx="287" cy="160" r="3.2" stroke="#AEB8C0" stroke-width="1.1"/>
+  <circle cx="54" cy="91" r="4.5" stroke="#8CA894" stroke-width="1.2"/>
+  <circle cx="281" cy="96" r="10" stroke="#8CA894" stroke-width="1.2"/>
+  <circle cx="46" cy="251" r="5.5" stroke="#8CA894" stroke-width="1.2"/>
+  <circle cx="287" cy="160" r="3.2" stroke="#8CA894" stroke-width="1.1"/>
 </svg>

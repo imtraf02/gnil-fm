@@ -65,5 +65,9 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
+# Keep first-party crates easy to debug while optimizing GPUI and other hot-path dependencies.
+[profile.dev.package."*"]
+opt-level = 2
+
 [patch.crates-io]
 gpui = { path = "vendor/gpui" }

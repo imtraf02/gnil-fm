@@ -1,3 +1,11 @@
+mod action_menu;
+mod device_refresh;
+mod empty_space_menu;
+mod pointer_interaction;
+mod ui;
+
+pub mod assets;
+pub mod file_manager;
 pub mod path_input;
 pub mod picker;
 pub mod portal_protocol;

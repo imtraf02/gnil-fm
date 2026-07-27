@@ -11,8 +11,8 @@ mod theme;
 
 pub use action::{ActionId, actions};
 pub use entry::{
-    DirectorySnapshot, FileEntry, FileKind, FileMetadata, GitStatus, SortDirection, SortField,
-    SortSpec, display_name, natural_cmp,
+    DirectoryLoadPhase, DirectorySnapshot, EntryMetadata, FileEntry, FileKind, FileMetadata,
+    GitStatus, SortDirection, SortField, SortSpec, display_name, natural_cmp,
 };
 pub use job::{JobEvent, JobId, JobPriority, JobProgress, JobState};
 pub use operation::{

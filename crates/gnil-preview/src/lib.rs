@@ -1,9 +1,14 @@
 //! Bounded, cancellation-friendly file preview generation.
 
+mod cache;
+
+pub use cache::PreviewCache;
+
 use std::{
     fs::{self, File},
     io::{self, Read},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::UNIX_EPOCH,
 };
 
@@ -93,6 +98,8 @@ pub enum PreviewError {
     Image(String),
     #[error("syntax highlighting error: {0}")]
     Highlight(String),
+    #[error("preview cancelled")]
+    Cancelled,
 }
 
 pub struct PreviewService {
@@ -111,9 +118,18 @@ impl Default for PreviewService {
 
 impl PreviewService {
     pub fn preview(&self, request: &PreviewRequest) -> Result<PreviewResult, PreviewError> {
+        self.preview_cancellable(request, &AtomicBool::new(false))
+    }
+
+    pub fn preview_cancellable(
+        &self,
+        request: &PreviewRequest,
+        cancelled: &AtomicBool,
+    ) -> Result<PreviewResult, PreviewError> {
+        ensure_not_cancelled(cancelled)?;
         let metadata = fs::symlink_metadata(&request.path)?;
         if metadata.is_dir() {
-            return Self::preview_directory(&request.path);
+            return Self::preview_directory(&request.path, cancelled);
         }
         if !metadata.is_file() {
             return Ok(PreviewResult::Metadata(metadata_preview(
@@ -134,7 +150,16 @@ impl PreviewService {
         let read_limit = request.text_limit.min(metadata.len());
         let mut bytes =
             Vec::with_capacity(usize::try_from(read_limit.min(8 * 1024 * 1024)).unwrap_or(0));
-        file.by_ref().take(read_limit).read_to_end(&mut bytes)?;
+        let mut limited = file.by_ref().take(read_limit);
+        let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+        loop {
+            ensure_not_cancelled(cancelled)?;
+            let read = limited.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+        }
         if bytes.iter().take(8 * 1024).any(|byte| *byte == 0) {
             return Ok(PreviewResult::Metadata(metadata_preview(
                 &request.path,
@@ -146,13 +171,18 @@ impl PreviewService {
             &request.path,
             &text,
             metadata.len() > read_limit,
+            cancelled,
         )?))
     }
 
-    fn preview_directory(path: &Path) -> Result<PreviewResult, PreviewError> {
+    fn preview_directory(
+        path: &Path,
+        cancelled: &AtomicBool,
+    ) -> Result<PreviewResult, PreviewError> {
         let mut child_count = 0;
         let mut unreadable_count = 0;
         for item in fs::read_dir(path)? {
+            ensure_not_cancelled(cancelled)?;
             if item.is_ok() {
                 child_count += 1;
             } else {
@@ -170,6 +200,7 @@ impl PreviewService {
         path: &Path,
         text: &str,
         truncated: bool,
+        cancelled: &AtomicBool,
     ) -> Result<TextPreview, PreviewError> {
         let syntax = self
             .syntaxes
@@ -185,6 +216,7 @@ impl PreviewService {
         let mut highlighter = HighlightLines::new(syntax, theme);
         let mut lines = Vec::new();
         for line in LinesWithEndings::from(text).take(10_000) {
+            ensure_not_cancelled(cancelled)?;
             let ranges = highlighter
                 .highlight_line(line, &self.syntaxes)
                 .map_err(|error| PreviewError::Highlight(error.to_string()))?;
@@ -203,6 +235,14 @@ impl PreviewService {
             truncated,
             syntax: syntax.name.clone(),
         })
+    }
+}
+
+fn ensure_not_cancelled(cancelled: &AtomicBool) -> Result<(), PreviewError> {
+    if cancelled.load(Ordering::Relaxed) {
+        Err(PreviewError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 

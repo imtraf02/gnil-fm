@@ -31,7 +31,16 @@ pub struct FileMetadata {
     pub mode: Option<u32>,
     pub readonly: bool,
     pub symlink_target: Option<PathBuf>,
+    pub symlink_target_kind: Option<FileKind>,
     pub mime: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum EntryMetadata {
+    #[default]
+    Pending,
+    Ready(FileMetadata),
+    Unavailable,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -40,7 +49,7 @@ pub struct FileEntry {
     pub name: String,
     pub kind: FileKind,
     pub hidden: bool,
-    pub metadata: FileMetadata,
+    pub metadata: EntryMetadata,
     pub git_status: Option<GitStatus>,
 }
 
@@ -49,6 +58,31 @@ impl FileEntry {
     pub fn extension(&self) -> Option<&str> {
         self.path.extension().and_then(OsStr::to_str)
     }
+
+    #[must_use]
+    pub const fn metadata(&self) -> Option<&FileMetadata> {
+        match &self.metadata {
+            EntryMetadata::Ready(metadata) => Some(metadata),
+            EntryMetadata::Pending | EntryMetadata::Unavailable => None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_directory_like(&self) -> bool {
+        self.kind == FileKind::Directory
+            || (self.kind == FileKind::Symlink
+                && self
+                    .metadata()
+                    .and_then(|metadata| metadata.symlink_target_kind)
+                    == Some(FileKind::Directory))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum DirectoryLoadPhase {
+    #[default]
+    Discovered,
+    Complete,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -57,6 +91,7 @@ pub struct DirectorySnapshot {
     pub path: PathBuf,
     pub entries: Vec<FileEntry>,
     pub unreadable_entries: usize,
+    pub phase: DirectoryLoadPhase,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -105,11 +140,8 @@ impl SortSpec {
                 .filter(|order| !order.is_eq())
                 .unwrap_or_else(|| match self.field {
                     SortField::Name => natural_cmp(&left.name, &right.name),
-                    SortField::Size => left.metadata.len.cmp(&right.metadata.len),
-                    SortField::Modified => left
-                        .metadata
-                        .modified_unix_ms
-                        .cmp(&right.metadata.modified_unix_ms),
+                    SortField::Size => metadata_len(left).cmp(&metadata_len(right)),
+                    SortField::Modified => metadata_modified(left).cmp(&metadata_modified(right)),
                     SortField::Kind => kind_rank(left.kind)
                         .cmp(&kind_rank(right.kind))
                         .then_with(|| natural_cmp(&left.name, &right.name)),
@@ -121,6 +153,16 @@ impl SortSpec {
             order
         });
     }
+}
+
+fn metadata_len(entry: &FileEntry) -> Option<u64> {
+    entry.metadata().map(|metadata| metadata.len)
+}
+
+fn metadata_modified(entry: &FileEntry) -> Option<i64> {
+    entry
+        .metadata()
+        .and_then(|metadata| metadata.modified_unix_ms)
 }
 
 const fn kind_rank(kind: FileKind) -> u8 {

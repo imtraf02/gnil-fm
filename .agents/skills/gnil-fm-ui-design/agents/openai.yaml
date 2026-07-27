@@ -1,0 +1,4 @@
+interface:
+  display_name: "gnil-fm UI Design"
+  short_description: "Quy ước UI/UX GPUI dành cho gnil-fm"
+  default_prompt: "Use $gnil-fm-ui-design to audit and improve this gnil-fm UI while preserving existing behavior."

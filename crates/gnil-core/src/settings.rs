@@ -38,13 +38,12 @@ pub struct AppSettings {
     pub reduced_motion: bool,
     pub worker_threads: usize,
     pub memory_cache_mib: usize,
-    pub disk_cache_mib: usize,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             theme: ThemeMode::Dark,
             light_theme: "GNIL Light".into(),
             dark_theme: "GNIL Dark".into(),
@@ -57,7 +56,18 @@ impl Default for AppSettings {
             reduced_motion: false,
             worker_threads: 4,
             memory_cache_mib: 128,
-            disk_cache_mib: 512,
+        }
+    }
+}
+
+impl AppSettings {
+    pub fn normalize(&mut self) {
+        self.schema_version = 2;
+        if !matches!(self.worker_threads, 2 | 4 | 8 | 16) {
+            self.worker_threads = 4;
+        }
+        if !matches!(self.memory_cache_mib, 64 | 128 | 256 | 512) {
+            self.memory_cache_mib = 128;
         }
     }
 }
@@ -94,7 +104,11 @@ impl ConfigPaths {
 
     pub fn load_settings(&self) -> Result<AppSettings, SettingsError> {
         match fs::read_to_string(&self.config) {
-            Ok(source) => Ok(toml::from_str(&source)?),
+            Ok(source) => {
+                let mut settings: AppSettings = toml::from_str(&source)?;
+                settings.normalize();
+                Ok(settings)
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(AppSettings::default()),
             Err(error) => Err(error.into()),
         }
@@ -150,5 +164,27 @@ mod tests {
         };
         paths.save_settings(&settings).unwrap();
         assert_eq!(paths.load_settings().unwrap(), settings);
+    }
+
+    #[test]
+    fn legacy_settings_are_normalized_and_unknown_disk_cache_is_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.toml");
+        fs::write(
+            &config,
+            "schema_version = 1\nworker_threads = 99\nmemory_cache_mib = 1\ndisk_cache_mib = 2048\n",
+        )
+        .unwrap();
+        let paths = ConfigPaths {
+            config,
+            keymap: root.path().join("keymap.toml"),
+            session: root.path().join("session.json"),
+            cache: root.path().join("cache"),
+            journal: root.path().join("journal.jsonl"),
+        };
+        let settings = paths.load_settings().unwrap();
+        assert_eq!(settings.schema_version, 2);
+        assert_eq!(settings.worker_threads, 4);
+        assert_eq!(settings.memory_cache_mib, 128);
     }
 }
