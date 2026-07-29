@@ -8,19 +8,21 @@ recursive I/O.
 | `gnil-clipboard` | Local file-URI and GNOME/KDE Wayland clipboard MIME encoding/decoding |
 | `gnil-core` | Stable models, action IDs, tab history, settings and serializable operation records |
 | `gnil-fs` | Directory scans, fuzzy search, watching, Git status, prioritized jobs and safe mutations |
+| `gnil-gpui` | First-party Linux/Wayland GPUI runtime tailored to gnil-fm |
 | `gnil-preview` | Bounded text, image, directory and metadata previews |
 | `gnil-app` | GPUI file-manager window plus the independent `gnil-fm-portal` picker service |
 
 The main binary is intentionally thin. File-manager behavior is grouped under
 `gnil-app/src/file_manager/` by loading, interaction, operation and view concerns. First-party Rust
-source files have a hard 2,000-line limit enforced by `nix flake check`; vendored GPUI sources are
-excluded.
+source files trigger a responsibility warning above 800 lines and require an explicit architecture
+review above 2,000 lines. Generated code, large config/data files, tests and `gnil-gpui` are
+excluded from this check.
 
 UI rendering is split further by surface: sidebar, header, appearance, menus, settings, operation
 sheets, lists and workspace. The portal picker follows the same loading/actions/view/footer split.
 Shared semantic icon, focus and overlay primitives live under `gnil-app/src/ui/`; project-specific
-UI changes must follow `.agents/skills/gnil-fm-ui-design/SKILL.md`. UI view modules have an enforced
-600-line limit even though the repository-wide safety limit is higher.
+UI changes must follow `.agents/skills/gnil-fm-ui-design/SKILL.md`. File size is a prompt to inspect
+responsibility boundaries, not a reason to split cohesive modules mechanically.
 
 ## Data flow
 
@@ -69,6 +71,9 @@ opens a separate GPUI picker, and keeps the method call pending until the picker
 The D-Bus executor communicates with the GPUI event loop through channels, so simultaneous callers
 never share navigation, selection, filter, choice or filename state. Closing a window, pressing
 Escape, clicking Cancel or invoking `Request.Close` all converge on the same exactly-once
-completion guard. GPUI is vendored at version 0.2.2 to add xdg-foreign v2 external parenting,
-native Wayland `text/uri-list` drag sources and an opt-in session-service keep-alive; normal
-`gnil-fm` windows otherwise retain upstream lifecycle behavior.
+completion guard. `gnil-gpui` is a hard first-party fork derived from GPUI 0.2.2. It supports only
+Linux/Wayland and keeps the application-specific xdg-foreign v2 parent handle, native
+`text/uri-list` drag source and explicit portal-service quit policy. Upstream platform backends,
+dynamic action registration, inspector tooling and unrelated services are intentionally absent.
+Unsafe Rust is denied at the crate root and allowed only in explicitly marked low-level runtime,
+renderer and Wayland boundary modules.

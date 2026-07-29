@@ -26,5 +26,23 @@ pub mod actions {
     pub const TOGGLE_PREVIEW: ActionId = ActionId("preview.toggle");
     pub const SEARCH_FILES: ActionId = ActionId("search.files");
     pub const TOGGLE_HIDDEN: ActionId = ActionId("view.toggle_hidden");
-    pub const TOGGLE_YAZI: ActionId = ActionId("keymap.toggle_yazi");
+    pub const SELECT_NEXT: ActionId = ActionId("selection.next");
+    pub const SELECT_PREVIOUS: ActionId = ActionId("selection.previous");
+    pub const SELECT_LEFT: ActionId = ActionId("selection.left");
+    pub const SELECT_RIGHT: ActionId = ActionId("selection.right");
+    pub const SELECT_NEXT_RANGE: ActionId = ActionId("selection.next_range");
+    pub const SELECT_PREVIOUS_RANGE: ActionId = ActionId("selection.previous_range");
+    pub const SELECT_LEFT_RANGE: ActionId = ActionId("selection.left_range");
+    pub const SELECT_RIGHT_RANGE: ActionId = ActionId("selection.right_range");
+    pub const TOGGLE_SELECTION: ActionId = ActionId("selection.toggle");
+    pub const SELECT_ALL: ActionId = ActionId("selection.all");
+    pub const REFRESH: ActionId = ActionId("view.refresh");
+    pub const TOGGLE_FAVORITE: ActionId = ActionId("favorites.toggle");
+    pub const TOGGLE_APPEARANCE: ActionId = ActionId("appearance.toggle");
+    pub const OPEN_SETTINGS: ActionId = ActionId("settings.open");
+    pub const OPEN_KEYMAP: ActionId = ActionId("settings.open_keymap");
+    pub const CREATE_FOLDER: ActionId = ActionId("file.create_folder");
+    pub const CREATE_FILE: ActionId = ActionId("file.create_file");
+    pub const EXTRACT: ActionId = ActionId("file.extract");
+    pub const EXTRACT_TO: ActionId = ActionId("file.extract_to");
 }

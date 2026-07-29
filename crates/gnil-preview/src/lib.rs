@@ -1,8 +1,12 @@
 //! Bounded, cancellation-friendly file preview generation.
 
 mod cache;
+mod thumbnail;
 
 pub use cache::PreviewCache;
+pub use thumbnail::{
+    ThumbnailError, ThumbnailRequest, ThumbnailResult, ThumbnailService, ThumbnailSource,
+};
 
 use std::{
     fs::{self, File},

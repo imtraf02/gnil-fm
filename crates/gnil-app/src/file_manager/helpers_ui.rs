@@ -47,36 +47,6 @@ fn sidebar_section_label(label: &'static str) -> AnyElement {
         .into_any_element()
 }
 
-fn trash_action_button(
-    label: &'static str,
-    danger: bool,
-    enabled: bool,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(label)
-        .h_8()
-        .px_3()
-        .rounded_md()
-        .flex()
-        .items_center()
-        .text_xs()
-        .text_color(if !enabled {
-            rgb(border_focused())
-        } else if danger {
-            rgb(danger_color())
-        } else {
-            rgb(theme_text())
-        })
-        .bg(rgb(surface_elevated()))
-        .when(enabled, |button| {
-            button
-                .cursor_pointer()
-                .hover(|style| style.bg(rgb(border())))
-        })
-        .when(enabled, FocusableControl::with_focus_ring)
-        .child(label)
-}
-
 fn trash_entry_as_file_entry(entry: &TrashEntry) -> FileEntry {
     FileEntry {
         path: entry.reference.info_path.clone(),
@@ -100,6 +70,15 @@ fn deletion_label(timestamp: i64) -> String {
                 .to_string()
         },
     )
+}
+
+const fn trash_kind_rank(kind: FileKind) -> u8 {
+    match kind {
+        FileKind::Directory => 0,
+        FileKind::File => 1,
+        FileKind::Symlink => 2,
+        FileKind::Other => 3,
+    }
 }
 
 const fn device_icon(kind: DeviceKind) -> &'static str {
@@ -357,6 +336,41 @@ fn size_label(entry: &FileEntry) -> String {
         entry
             .metadata()
             .map_or_else(|| "—".into(), |metadata| format_bytes(metadata.len))
+    }
+}
+
+fn type_label(entry: &FileEntry) -> String {
+    if entry.is_directory_like() {
+        return "File folder".into();
+    }
+    if entry.kind == FileKind::Symlink {
+        return "Symbolic link".into();
+    }
+    match file_icon_asset(entry) {
+        "icons/file-code.svg" => "Source file".into(),
+        "icons/file-text.svg" => "Text document".into(),
+        "icons/file-image.svg" => "Image".into(),
+        "icons/file-document.svg" => "Document".into(),
+        "icons/file-archive.svg" => "Archive".into(),
+        "icons/file-media.svg" => entry
+            .metadata()
+            .and_then(|metadata| metadata.mime.as_deref())
+            .map_or_else(
+                || "Media".into(),
+                |mime| {
+                    if mime.starts_with("audio/") {
+                        "Audio".into()
+                    } else if mime.starts_with("video/") {
+                        "Video".into()
+                    } else {
+                        "Media".into()
+                    }
+                },
+            ),
+        _ => entry.extension().map_or_else(
+            || "File".into(),
+            |extension| format!("{} file", extension.to_ascii_uppercase()),
+        ),
     }
 }
 

@@ -4,6 +4,8 @@ use gnil_core::{FileEntry, FileKind, SelectionState};
 use gnil_fs::is_archive_candidate;
 use gpui::{Pixels, Point};
 
+use crate::open_with::DesktopApplication;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ActionMenuPlacement {
     Header,
@@ -29,6 +31,11 @@ pub(crate) enum FileMenuCommand {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FileMenuSubmenu {
+    OpenWith,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MenuEntry {
     Action {
         command: FileMenuCommand,
@@ -37,7 +44,31 @@ pub(crate) enum MenuEntry {
         enabled: bool,
         danger: bool,
     },
+    Submenu {
+        submenu: FileMenuSubmenu,
+        label: &'static str,
+        enabled: bool,
+    },
     Separator,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MenuToolbarAction {
+    pub(crate) command: FileMenuCommand,
+    pub(crate) label: &'static str,
+    pub(crate) enabled: bool,
+}
+
+impl MenuToolbarAction {
+    pub(crate) fn enabled_command(&self) -> Option<FileMenuCommand> {
+        self.enabled.then_some(self.command)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MenuFocusTarget {
+    Toolbar(usize),
+    Entry(usize),
 }
 
 impl MenuEntry {
@@ -48,7 +79,18 @@ impl MenuEntry {
                 enabled: true,
                 ..
             } => Some(*command),
-            Self::Action { .. } | Self::Separator => None,
+            Self::Action { .. } | Self::Submenu { .. } | Self::Separator => None,
+        }
+    }
+
+    pub(crate) fn enabled_submenu(&self) -> Option<FileMenuSubmenu> {
+        match self {
+            Self::Submenu {
+                submenu,
+                enabled: true,
+                ..
+            } => Some(*submenu),
+            Self::Action { .. } | Self::Submenu { .. } | Self::Separator => None,
         }
     }
 }
@@ -62,16 +104,37 @@ pub(crate) enum MenuAnimationState {
 #[derive(Clone, Debug)]
 pub(crate) struct ActionMenuState {
     pub(crate) placement: ActionMenuPlacement,
+    pub(crate) toolbar_actions: Vec<MenuToolbarAction>,
     pub(crate) entries: Vec<MenuEntry>,
-    pub(crate) focused: Option<usize>,
+    pub(crate) focused: Option<MenuFocusTarget>,
+    pub(crate) open_with_submenu: Option<OpenWithSubmenuState>,
     pub(crate) animation: MenuAnimationState,
     pub(crate) serial: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OpenWithSubmenuState {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) mime_type: String,
+    pub(crate) applications: Vec<DesktopApplication>,
+    pub(crate) loading: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) focused: Option<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ActionMenuActivation {
+    Command(FileMenuCommand),
+    Submenu(FileMenuSubmenu),
+    OpenWithApplication(DesktopApplication),
+    ChooseAnotherApplication,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct MenuContext {
     pub(crate) selected_count: usize,
+    pub(crate) open_with_eligible: bool,
     pub(crate) permissions_supported: bool,
     pub(crate) clipboard_valid: bool,
     pub(crate) operation_running: bool,
@@ -96,8 +159,16 @@ impl MenuContext {
             .collect();
         let favorite_eligible =
             selected_entries.len() == 1 && selected_entries[0].is_directory_like();
+        let open_with_eligible = selected_entries.len() == 1
+            && (selected_entries[0].kind == FileKind::File
+                || (selected_entries[0].kind == FileKind::Symlink
+                    && selected_entries[0]
+                        .metadata()
+                        .and_then(|metadata| metadata.symlink_target_kind)
+                        == Some(FileKind::File)));
         Self {
             selected_count: selected_paths.len(),
+            open_with_eligible,
             permissions_supported: !selected_entries.is_empty()
                 && selected_entries.iter().all(|entry| {
                     entry.kind != FileKind::Symlink
@@ -125,6 +196,29 @@ impl ActionMenuState {
         let has_selection = context.selected_count > 0;
         let single_selection = context.selected_count == 1;
         let writes_enabled = !context.operation_running;
+        let toolbar_actions = vec![
+            toolbar_action(FileMenuCommand::Cut, "Cut", has_selection),
+            toolbar_action(FileMenuCommand::Copy, "Copy", has_selection),
+            toolbar_action(
+                FileMenuCommand::Paste,
+                "Paste",
+                context.clipboard_valid && writes_enabled,
+            ),
+            toolbar_action(
+                FileMenuCommand::Rename,
+                if context.selected_count > 1 {
+                    "Bulk rename"
+                } else {
+                    "Rename"
+                },
+                has_selection && writes_enabled,
+            ),
+            toolbar_action(
+                FileMenuCommand::Trash,
+                "Move to Trash",
+                has_selection && writes_enabled,
+            ),
+        ];
         let mut entries = vec![
             action(
                 FileMenuCommand::Open,
@@ -132,37 +226,17 @@ impl ActionMenuState {
                 Some("Enter"),
                 single_selection,
             ),
-            MenuEntry::Separator,
-            action(FileMenuCommand::Copy, "Copy", Some("Ctrl+C"), has_selection),
-            action(FileMenuCommand::Cut, "Cut", Some("Ctrl+X"), has_selection),
-            action(
-                FileMenuCommand::Paste,
-                "Paste",
-                Some("Ctrl+V"),
-                context.clipboard_valid && writes_enabled,
+            submenu(
+                FileMenuSubmenu::OpenWith,
+                "Open with",
+                context.open_with_eligible,
             ),
             MenuEntry::Separator,
-            action(
-                FileMenuCommand::Rename,
-                if context.selected_count > 1 {
-                    "Bulk rename"
-                } else {
-                    "Rename"
-                },
-                Some("F2"),
-                has_selection && writes_enabled,
-            ),
             action(
                 FileMenuCommand::CreateSymlink,
                 "New symlink",
                 Some("Ctrl+Shift+L"),
                 writes_enabled,
-            ),
-            action(
-                FileMenuCommand::Permissions,
-                "Permissions",
-                Some("Alt+Enter"),
-                context.permissions_supported && writes_enabled,
             ),
             MenuEntry::Separator,
             action(
@@ -177,13 +251,13 @@ impl ActionMenuState {
                 Some("Ctrl+Alt+C"),
                 has_selection,
             ),
-            MenuEntry::Separator,
             action(
-                FileMenuCommand::Trash,
-                "Move to Trash",
-                Some("Delete"),
-                has_selection && writes_enabled,
+                FileMenuCommand::Permissions,
+                "Properties",
+                Some("Alt+Enter"),
+                context.permissions_supported && writes_enabled,
             ),
+            MenuEntry::Separator,
             dangerous_action(
                 FileMenuCommand::DeletePermanently,
                 "Delete Permanently",
@@ -192,23 +266,25 @@ impl ActionMenuState {
             ),
         ];
         add_contextual_actions(&mut entries, context, writes_enabled);
-        let focused = entries.iter().position(is_selectable);
-        Self {
+        let mut state = Self {
             placement,
+            toolbar_actions,
             entries,
-            focused,
+            focused: None,
+            open_with_submenu: None,
             animation: MenuAnimationState::Opening,
             serial,
-        }
+        };
+        state.focus_first();
+        state
     }
 
     pub(crate) fn move_focus(&mut self, direction: isize) {
-        let selectable: Vec<_> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| is_selectable(entry).then_some(index))
-            .collect();
+        if let Some(submenu) = self.open_with_submenu.as_mut() {
+            submenu.move_focus(direction);
+            return;
+        }
+        let selectable = self.selectable_targets();
         if selectable.is_empty() {
             self.focused = None;
             return;
@@ -226,23 +302,148 @@ impl ActionMenuState {
     }
 
     pub(crate) fn focus_first(&mut self) {
-        self.focused = self.entries.iter().position(is_selectable);
+        if let Some(submenu) = self.open_with_submenu.as_mut() {
+            submenu.focused = Some(0);
+            return;
+        }
+        self.focused = self.selectable_targets().into_iter().next();
     }
 
     pub(crate) fn focus_last(&mut self) {
-        self.focused = self.entries.iter().rposition(is_selectable);
+        if let Some(submenu) = self.open_with_submenu.as_mut() {
+            submenu.focused = Some(submenu.applications.len());
+            return;
+        }
+        self.focused = self.selectable_targets().into_iter().last();
     }
 
-    pub(crate) fn focus(&mut self, index: usize) {
+    pub(crate) fn focus_entry(&mut self, index: usize) {
         if self.entries.get(index).is_some_and(is_selectable) {
-            self.focused = Some(index);
+            self.focused = Some(MenuFocusTarget::Entry(index));
+            if self
+                .entries
+                .get(index)
+                .and_then(MenuEntry::enabled_submenu)
+                .is_none()
+            {
+                self.close_submenu();
+            }
         }
     }
 
+    pub(crate) fn focus_toolbar(&mut self, index: usize) {
+        if self
+            .toolbar_actions
+            .get(index)
+            .is_some_and(|action| action.enabled)
+        {
+            self.focused = Some(MenuFocusTarget::Toolbar(index));
+            self.close_submenu();
+        }
+    }
+
+    pub(crate) fn focused_activation(&self) -> Option<ActionMenuActivation> {
+        if let Some(submenu) = &self.open_with_submenu {
+            let focused = submenu.focused?;
+            return submenu
+                .applications
+                .get(focused)
+                .cloned()
+                .map(ActionMenuActivation::OpenWithApplication)
+                .or_else(|| {
+                    (focused == submenu.applications.len())
+                        .then_some(ActionMenuActivation::ChooseAnotherApplication)
+                });
+        }
+        match self.focused? {
+            MenuFocusTarget::Toolbar(index) => self
+                .toolbar_actions
+                .get(index)
+                .and_then(MenuToolbarAction::enabled_command)
+                .map(ActionMenuActivation::Command),
+            MenuFocusTarget::Entry(index) => {
+                let entry = self.entries.get(index)?;
+                entry
+                    .enabled_command()
+                    .map(ActionMenuActivation::Command)
+                    .or_else(|| entry.enabled_submenu().map(ActionMenuActivation::Submenu))
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn focused_command(&self) -> Option<FileMenuCommand> {
-        self.focused
-            .and_then(|index| self.entries.get(index))
-            .and_then(MenuEntry::enabled_command)
+        match self.focused_activation() {
+            Some(ActionMenuActivation::Command(command)) => Some(command),
+            Some(
+                ActionMenuActivation::Submenu(_)
+                | ActionMenuActivation::OpenWithApplication(_)
+                | ActionMenuActivation::ChooseAnotherApplication,
+            )
+            | None => None,
+        }
+    }
+
+    pub(crate) fn open_open_with_submenu(&mut self, path: std::path::PathBuf, mime_type: String) {
+        if self
+            .open_with_submenu
+            .as_ref()
+            .is_some_and(|submenu| submenu.path == path && submenu.mime_type == mime_type)
+        {
+            return;
+        }
+        self.open_with_submenu = Some(OpenWithSubmenuState {
+            path,
+            mime_type,
+            applications: Vec::new(),
+            loading: true,
+            error: None,
+            focused: Some(0),
+        });
+    }
+
+    pub(crate) fn close_submenu(&mut self) -> bool {
+        self.open_with_submenu.take().is_some()
+    }
+
+    pub(crate) fn focus_open_with(&mut self, index: usize) {
+        if let Some(submenu) = self.open_with_submenu.as_mut()
+            && index <= submenu.applications.len()
+        {
+            submenu.focused = Some(index);
+        }
+    }
+
+    fn selectable_targets(&self) -> Vec<MenuFocusTarget> {
+        self.toolbar_actions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, action)| action.enabled.then_some(MenuFocusTarget::Toolbar(index)))
+            .chain(
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| {
+                        is_selectable(entry).then_some(MenuFocusTarget::Entry(index))
+                    }),
+            )
+            .collect()
+    }
+}
+
+impl OpenWithSubmenuState {
+    fn move_focus(&mut self, direction: isize) {
+        let item_count = self.applications.len() + 1;
+        let current = self.focused.unwrap_or_default().min(item_count - 1);
+        self.focused = Some(if direction.is_negative() {
+            if current == 0 {
+                item_count - 1
+            } else {
+                current - 1
+            }
+        } else {
+            (current + 1) % item_count
+        });
     }
 }
 
@@ -275,6 +476,26 @@ fn action(
     }
 }
 
+fn submenu(submenu: FileMenuSubmenu, label: &'static str, enabled: bool) -> MenuEntry {
+    MenuEntry::Submenu {
+        submenu,
+        label,
+        enabled,
+    }
+}
+
+fn toolbar_action(
+    command: FileMenuCommand,
+    label: &'static str,
+    enabled: bool,
+) -> MenuToolbarAction {
+    MenuToolbarAction {
+        command,
+        label,
+        enabled,
+    }
+}
+
 fn add_contextual_actions(
     entries: &mut Vec<MenuEntry>,
     context: MenuContext,
@@ -282,7 +503,7 @@ fn add_contextual_actions(
 ) {
     if context.all_selected_archives {
         entries.splice(
-            1..1,
+            2..2,
             [
                 action(
                     FileMenuCommand::Extract,
@@ -302,20 +523,8 @@ fn add_contextual_actions(
     if !context.favorite_eligible {
         return;
     }
-    let rename_index = entries
-        .iter()
-        .position(|entry| {
-            matches!(
-                entry,
-                MenuEntry::Action {
-                    command: FileMenuCommand::Rename,
-                    ..
-                }
-            )
-        })
-        .unwrap_or(0);
     entries.insert(
-        rename_index + 1,
+        2,
         action(
             FileMenuCommand::ToggleFavorite,
             if context.selected_is_favorite {
@@ -345,7 +554,7 @@ fn dangerous_action(
 }
 
 fn is_selectable(entry: &MenuEntry) -> bool {
-    entry.enabled_command().is_some()
+    entry.enabled_command().is_some() || entry.enabled_submenu().is_some()
 }
 
 #[cfg(test)]
@@ -379,7 +588,7 @@ mod tests {
         }
     }
 
-    fn command(menu: &ActionMenuState, command: FileMenuCommand) -> &MenuEntry {
+    fn menu_entry(menu: &ActionMenuState, command: FileMenuCommand) -> &MenuEntry {
         menu.entries
             .iter()
             .find(|entry| {
@@ -388,7 +597,23 @@ mod tests {
             .expect("command entry")
     }
 
-    fn is_enabled(entry: &MenuEntry) -> bool {
+    fn toolbar_action(menu: &ActionMenuState, command: FileMenuCommand) -> &MenuToolbarAction {
+        menu.toolbar_actions
+            .iter()
+            .find(|action| action.command == command)
+            .expect("toolbar action")
+    }
+
+    fn menu_submenu(menu: &ActionMenuState, submenu: FileMenuSubmenu) -> &MenuEntry {
+        menu.entries
+            .iter()
+            .find(|entry| {
+                matches!(entry, MenuEntry::Submenu { submenu: candidate, .. } if *candidate == submenu)
+            })
+            .expect("submenu entry")
+    }
+
+    fn is_entry_enabled(entry: &MenuEntry) -> bool {
         matches!(entry, MenuEntry::Action { enabled: true, .. })
     }
 
@@ -402,10 +627,13 @@ mod tests {
             },
             1,
         );
-        assert!(!is_enabled(command(&menu, FileMenuCommand::Open)));
-        assert!(!is_enabled(command(&menu, FileMenuCommand::Copy)));
-        assert!(is_enabled(command(&menu, FileMenuCommand::Paste)));
-        assert!(is_enabled(command(&menu, FileMenuCommand::CreateSymlink)));
+        assert!(!is_entry_enabled(menu_entry(&menu, FileMenuCommand::Open)));
+        assert!(!toolbar_action(&menu, FileMenuCommand::Copy).enabled);
+        assert!(toolbar_action(&menu, FileMenuCommand::Paste).enabled);
+        assert!(is_entry_enabled(menu_entry(
+            &menu,
+            FileMenuCommand::CreateSymlink
+        )));
     }
 
     #[test]
@@ -415,28 +643,106 @@ mod tests {
         selection.select_only(0, &entries);
         let single = MenuContext::from_selection(&selection, &entries, &[], false, false);
         let single = ActionMenuState::new(ActionMenuPlacement::Header, single, 1);
-        assert!(is_enabled(command(&single, FileMenuCommand::Open)));
-        assert!(is_enabled(command(&single, FileMenuCommand::Permissions)));
+        assert!(is_entry_enabled(menu_entry(&single, FileMenuCommand::Open)));
+        assert!(is_entry_enabled(menu_entry(
+            &single,
+            FileMenuCommand::Permissions
+        )));
         assert!(matches!(
-            command(&single, FileMenuCommand::Rename),
+            menu_entry(&single, FileMenuCommand::Permissions),
             MenuEntry::Action {
+                label: "Properties",
+                shortcut: Some("Alt+Enter"),
+                ..
+            }
+        ));
+        assert!(matches!(
+            toolbar_action(&single, FileMenuCommand::Rename),
+            MenuToolbarAction {
                 label: "Rename",
                 ..
             }
+        ));
+        assert!(matches!(
+            menu_submenu(&single, FileMenuSubmenu::OpenWith),
+            MenuEntry::Submenu { enabled: true, .. }
         ));
 
         selection.extend_to(1, &entries);
         let multiple = MenuContext::from_selection(&selection, &entries, &[], false, false);
         let multiple = ActionMenuState::new(ActionMenuPlacement::Header, multiple, 2);
-        assert!(!is_enabled(command(&multiple, FileMenuCommand::Open)));
+        assert!(!is_entry_enabled(menu_entry(
+            &multiple,
+            FileMenuCommand::Open
+        )));
         assert!(matches!(
-            command(&multiple, FileMenuCommand::Rename),
-            MenuEntry::Action {
+            toolbar_action(&multiple, FileMenuCommand::Rename),
+            MenuToolbarAction {
                 label: "Bulk rename",
                 enabled: true,
                 ..
             }
         ));
+        assert!(matches!(
+            menu_submenu(&multiple, FileMenuSubmenu::OpenWith),
+            MenuEntry::Submenu { enabled: false, .. }
+        ));
+    }
+
+    #[test]
+    fn open_with_accepts_files_and_file_symlinks_but_not_folders() {
+        let mut entries = entries();
+        if let EntryMetadata::Ready(metadata) = &mut entries[2].metadata {
+            metadata.symlink_target_kind = Some(FileKind::File);
+        }
+        let mut selection = SelectionState::default();
+
+        selection.select_only(2, &entries);
+        let symlink = MenuContext::from_selection(&selection, &entries, &[], false, false);
+        assert!(symlink.open_with_eligible);
+
+        selection.select_only(1, &entries);
+        let folder = MenuContext::from_selection(&selection, &entries, &[], false, false);
+        assert!(!folder.open_with_eligible);
+    }
+
+    #[test]
+    fn open_with_submenu_keyboard_focuses_apps_then_choose_another() {
+        let mut menu = ActionMenuState::new(
+            ActionMenuPlacement::Header,
+            MenuContext {
+                selected_count: 1,
+                open_with_eligible: true,
+                ..MenuContext::default()
+            },
+            1,
+        );
+        menu.open_open_with_submenu(PathBuf::from("/tmp/file.txt"), "text/plain".into());
+        let submenu = menu.open_with_submenu.as_mut().expect("open submenu");
+        submenu.loading = false;
+        submenu.applications.push(DesktopApplication {
+            desktop_id: "editor.desktop".into(),
+            name: "Editor".into(),
+            generic_name: Some("Text Editor".into()),
+            desktop_file: PathBuf::from("/tmp/editor.desktop"),
+            is_default: true,
+            compatible: true,
+        });
+        menu.open_open_with_submenu(PathBuf::from("/tmp/file.txt"), "text/plain".into());
+        let submenu = menu.open_with_submenu.as_ref().expect("open submenu");
+        assert!(!submenu.loading);
+        assert_eq!(submenu.applications.len(), 1);
+
+        assert!(matches!(
+            menu.focused_activation(),
+            Some(ActionMenuActivation::OpenWithApplication(_))
+        ));
+        menu.move_focus(1);
+        assert_eq!(
+            menu.focused_activation(),
+            Some(ActionMenuActivation::ChooseAnotherApplication)
+        );
+        assert!(menu.close_submenu());
     }
 
     #[test]
@@ -448,7 +754,7 @@ mod tests {
         let add = MenuContext::from_selection(&selection, &entries, &[], false, false);
         let add = ActionMenuState::new(ActionMenuPlacement::Header, add, 1);
         assert!(matches!(
-            command(&add, FileMenuCommand::ToggleFavorite),
+            menu_entry(&add, FileMenuCommand::ToggleFavorite),
             MenuEntry::Action {
                 label: "Add to Favorites",
                 enabled: true,
@@ -460,7 +766,7 @@ mod tests {
         let remove = MenuContext::from_selection(&selection, &entries, &favorites, false, false);
         let remove = ActionMenuState::new(ActionMenuPlacement::Header, remove, 2);
         assert!(matches!(
-            command(&remove, FileMenuCommand::ToggleFavorite),
+            menu_entry(&remove, FileMenuCommand::ToggleFavorite),
             MenuEntry::Action {
                 label: "Remove from Favorites",
                 enabled: true,
@@ -476,11 +782,14 @@ mod tests {
         selection.select_only(2, &entries);
         let context = MenuContext::from_selection(&selection, &entries, &[], true, true);
         let menu = ActionMenuState::new(ActionMenuPlacement::Header, context, 1);
-        assert!(!is_enabled(command(&menu, FileMenuCommand::Permissions)));
-        assert!(!is_enabled(command(&menu, FileMenuCommand::Paste)));
-        assert!(!is_enabled(command(&menu, FileMenuCommand::Rename)));
-        assert!(!is_enabled(command(&menu, FileMenuCommand::Trash)));
-        assert!(is_enabled(command(&menu, FileMenuCommand::Copy)));
+        assert!(!is_entry_enabled(menu_entry(
+            &menu,
+            FileMenuCommand::Permissions
+        )));
+        assert!(!toolbar_action(&menu, FileMenuCommand::Paste).enabled);
+        assert!(!toolbar_action(&menu, FileMenuCommand::Rename).enabled);
+        assert!(!toolbar_action(&menu, FileMenuCommand::Trash).enabled);
+        assert!(toolbar_action(&menu, FileMenuCommand::Copy).enabled);
     }
 
     #[test]
@@ -497,9 +806,9 @@ mod tests {
             },
             1,
         );
-        assert!(!is_enabled(command(&menu, FileMenuCommand::Paste)));
+        assert!(!toolbar_action(&menu, FileMenuCommand::Paste).enabled);
         assert!(matches!(
-            command(&menu, FileMenuCommand::DeletePermanently),
+            menu_entry(&menu, FileMenuCommand::DeletePermanently),
             MenuEntry::Action { danger: true, .. }
         ));
         assert_eq!(
@@ -522,8 +831,14 @@ mod tests {
             },
             1,
         );
-        assert!(is_enabled(command(&menu, FileMenuCommand::Extract)));
-        assert!(is_enabled(command(&menu, FileMenuCommand::ExtractTo)));
+        assert!(is_entry_enabled(menu_entry(
+            &menu,
+            FileMenuCommand::Extract
+        )));
+        assert!(is_entry_enabled(menu_entry(
+            &menu,
+            FileMenuCommand::ExtractTo
+        )));
 
         let regular = ActionMenuState::new(
             ActionMenuPlacement::Header,
@@ -563,19 +878,49 @@ mod tests {
             2,
         );
         populated.focus_first();
-        assert_eq!(populated.focused_command(), Some(FileMenuCommand::Copy));
+        assert_eq!(populated.focused_command(), Some(FileMenuCommand::Cut));
         populated.move_focus(-1);
         assert_eq!(
             populated.focused_command(),
             Some(FileMenuCommand::DeletePermanently)
         );
         populated.move_focus(1);
-        assert_eq!(populated.focused_command(), Some(FileMenuCommand::Copy));
+        assert_eq!(populated.focused_command(), Some(FileMenuCommand::Cut));
         populated.focus_last();
         assert_eq!(
             populated.focused_command(),
             Some(FileMenuCommand::DeletePermanently)
         );
+    }
+
+    #[test]
+    fn toolbar_actions_replace_repeated_rows_and_receive_keyboard_focus() {
+        let mut menu = ActionMenuState::new(
+            ActionMenuPlacement::Header,
+            MenuContext {
+                selected_count: 1,
+                clipboard_valid: true,
+                permissions_supported: true,
+                ..MenuContext::default()
+            },
+            1,
+        );
+        assert_eq!(menu.focused_command(), Some(FileMenuCommand::Cut));
+        menu.move_focus(1);
+        assert_eq!(menu.focused_command(), Some(FileMenuCommand::Copy));
+        assert!(menu.entries.iter().all(|entry| {
+            !matches!(
+                entry,
+                MenuEntry::Action {
+                    command: FileMenuCommand::Cut
+                        | FileMenuCommand::Copy
+                        | FileMenuCommand::Paste
+                        | FileMenuCommand::Rename
+                        | FileMenuCommand::Trash,
+                    ..
+                }
+            )
+        }));
     }
 
     #[test]

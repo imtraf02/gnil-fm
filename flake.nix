@@ -23,7 +23,6 @@
         zlib
         zstd
       ];
-      testLibraries = pkgs: runtimeLibraries pkgs ++ [ pkgs.libxcb ];
       nixosModule = { config, lib, pkgs, ... }:
         let cfg = config.programs.gnil-fm; in {
           options.programs.gnil-fm = {
@@ -87,8 +86,8 @@
               rustc
               rustfmt
             ];
-            buildInputs = testLibraries pkgs;
-            LD_LIBRARY_PATH = nixpkgs.lib.makeLibraryPath (testLibraries pkgs);
+            buildInputs = runtimeLibraries pkgs;
+            LD_LIBRARY_PATH = nixpkgs.lib.makeLibraryPath (runtimeLibraries pkgs);
             LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
             RUST_BACKTRACE = "1";
           };
@@ -119,7 +118,7 @@
             src = cleanSource;
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [ pkgs.clang pkgs.cmake pkgs.makeWrapper pkgs.pkg-config ];
-            buildInputs = testLibraries pkgs;
+            buildInputs = runtimeLibraries pkgs;
             LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
             postInstall = ''
               install -Dm644 packaging/gnil-fm.desktop \

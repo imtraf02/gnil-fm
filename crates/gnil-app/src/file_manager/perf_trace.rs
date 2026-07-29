@@ -26,6 +26,9 @@ struct PerfTrace {
     report_started: Instant,
     root: RenderPerfBucket,
     surfaces: [RenderPerfBucket; FileManagerSurfaceKind::COUNT],
+    invalidations: [u64; FileManagerSurfaceKind::COUNT],
+    rows_rendered: u64,
+    row_batches: u64,
     pointer_received: u64,
     pointer_queued: u64,
     pointer_applied: u64,
@@ -42,6 +45,9 @@ impl PerfTrace {
             report_started: Instant::now(),
             root: RenderPerfBucket::default(),
             surfaces: [RenderPerfBucket::default(); FileManagerSurfaceKind::COUNT],
+            invalidations: [0; FileManagerSurfaceKind::COUNT],
+            rows_rendered: 0,
+            row_batches: 0,
             pointer_received: 0,
             pointer_queued: 0,
             pointer_applied: 0,
@@ -52,18 +58,81 @@ impl PerfTrace {
         }
     }
 
-    fn record_root(&mut self, elapsed: Duration) {
-        if self.enabled {
-            self.root.record(elapsed);
+    fn start(&self) -> Option<Instant> {
+        self.enabled.then(Instant::now)
+    }
+
+    fn record_root(&mut self, started: Option<Instant>) {
+        if let Some(started) = started {
+            self.root.record(started.elapsed());
             self.maybe_report();
         }
     }
 
-    fn record_surface(&mut self, kind: FileManagerSurfaceKind, elapsed: Duration) {
-        if self.enabled {
-            self.surfaces[kind.index()].record(elapsed);
+    fn record_surface(&mut self, kind: FileManagerSurfaceKind, started: Option<Instant>) {
+        if let Some(started) = started {
+            self.surfaces[kind.index()].record(started.elapsed());
             self.maybe_report();
         }
+    }
+
+    fn record_invalidation(&mut self, mask: SurfaceMask) {
+        if !self.enabled {
+            return;
+        }
+        for kind in FileManagerSurfaceKind::ALL {
+            if mask.contains(kind) {
+                self.invalidations[kind.index()] =
+                    self.invalidations[kind.index()].saturating_add(1);
+            }
+        }
+        self.maybe_report();
+    }
+
+    fn record_rows_rendered(&mut self, count: usize) {
+        if self.enabled {
+            self.rows_rendered = self
+                .rows_rendered
+                .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+            self.row_batches = self.row_batches.saturating_add(1);
+            self.maybe_report();
+        }
+    }
+
+    fn record_folder_navigation(&mut self, generation: u64, path_id: u64, started: Option<Instant>) {
+        if !self.enabled {
+            return;
+        }
+        let Some(started) = started else {
+            return;
+        };
+        eprintln!(
+            "gnil-folder generation:{generation} path:{path_id:016x} phase:navigation \
+             nav_main:{}us",
+            started.elapsed().as_micros()
+        );
+    }
+
+    fn record_folder_phase(
+        &mut self,
+        generation: u64,
+        path_id: u64,
+        phase: DirectoryLoadPhase,
+        elapsed: Option<Duration>,
+        entries: usize,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let phase = match phase {
+            DirectoryLoadPhase::Discovered => "discovered",
+            DirectoryLoadPhase::Complete => "complete",
+        };
+        eprintln!(
+            "gnil-folder generation:{generation} path:{path_id:016x} phase:{phase} \
+             elapsed:{}us entries:{entries} child_count_jobs:0",
+            elapsed.unwrap_or_default().as_micros()
+        );
     }
 
     fn record_pointer_received(&mut self) {
@@ -112,7 +181,8 @@ impl PerfTrace {
             self.pointer_latency_samples_micros[index]
         };
         eprintln!(
-            "gnil-perf root={} avg={}us max={}us surfaces=[{}] pointer=recv:{} queued:{} \
+            "gnil-perf root={} avg={}us max={}us surfaces=[{}] invalidations=[{}] \
+             rows:{}@{} pointer=recv:{} queued:{} \
              applied:{} avg:{}us p95:{}us max:{}us",
             self.root.count,
             self.root.average_micros(),
@@ -131,6 +201,13 @@ impl PerfTrace {
                 })
                 .collect::<Vec<_>>()
                 .join(","),
+            FileManagerSurfaceKind::ALL
+                .iter()
+                .map(|kind| format!("{}:{}", kind.name(), self.invalidations[kind.index()]))
+                .collect::<Vec<_>>()
+                .join(","),
+            self.rows_rendered,
+            self.row_batches,
             self.pointer_received,
             self.pointer_queued,
             self.pointer_applied,
@@ -145,6 +222,9 @@ impl PerfTrace {
         self.report_started = Instant::now();
         self.root = RenderPerfBucket::default();
         self.surfaces = [RenderPerfBucket::default(); FileManagerSurfaceKind::COUNT];
+        self.invalidations = [0; FileManagerSurfaceKind::COUNT];
+        self.rows_rendered = 0;
+        self.row_batches = 0;
         self.pointer_received = 0;
         self.pointer_queued = 0;
         self.pointer_applied = 0;

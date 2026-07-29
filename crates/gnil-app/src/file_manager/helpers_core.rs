@@ -211,7 +211,9 @@ fn places() -> Vec<(String, PathBuf)> {
 fn favorite_availability(favorites: &[PathBuf]) -> HashMap<PathBuf, bool> {
     favorites
         .iter()
-        .map(|favorite| (favorite.clone(), favorite.is_dir()))
+        // Availability is optimistic until the background probe completes. Never block startup
+        // or folder navigation on a favorite that may live on a slow/offline mount.
+        .map(|favorite| (favorite.clone(), true))
         .collect()
 }
 
@@ -403,21 +405,6 @@ fn operation_from_sheet(
             Ok(FsOperation::SetPermissions {
                 paths: paths.clone(),
                 change,
-            })
-        }
-        OperationSheet::Rename { from, name } => {
-            let name = name.read(cx).text().trim().to_owned();
-            validate_file_name(&name)?;
-            let to = from
-                .parent()
-                .ok_or_else(|| "Cannot rename a filesystem root".to_owned())?
-                .join(name);
-            if to == *from {
-                return Err("The name is unchanged".into());
-            }
-            Ok(FsOperation::Rename {
-                from: from.clone(),
-                to,
             })
         }
         OperationSheet::BulkRename { .. } => Ok(FsOperation::BulkRename {

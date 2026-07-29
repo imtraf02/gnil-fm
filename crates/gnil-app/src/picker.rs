@@ -129,9 +129,9 @@ fn open_picker_window(
         PickerRequestKind::Save(options) => options.common.modal,
         PickerRequestKind::SaveMany(options) => options.common.modal,
     };
-    let external_parent = crate::portal_protocol::parent_handle(&request.parent_window)
+    let wayland_parent = crate::portal_protocol::parent_handle(&request.parent_window)
         .map(str::to_owned)
-        .map(gpui::ExternalWindowParent::Wayland);
+        .map(gpui::WaylandParentHandle::new);
     let opened = cx.open_window(
         gpui::WindowOptions {
             window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
@@ -147,7 +147,7 @@ fn open_picker_window(
             } else {
                 gpui::WindowKind::Normal
             },
-            external_parent,
+            wayland_parent,
             ..Default::default()
         },
         |window, cx| {
@@ -234,7 +234,6 @@ struct Picker {
     visible_indices: Arc<[usize]>,
     directory_watcher: Option<DirectoryWatcher>,
     watched_path: Option<PathBuf>,
-    watcher_polling: bool,
 }
 
 include!("picker/loading.rs");

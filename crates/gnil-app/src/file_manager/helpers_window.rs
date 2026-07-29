@@ -144,17 +144,3 @@ fn setting_chip(label: &'static str, active: bool) -> gpui::Stateful<gpui::Div> 
         .with_focus_ring()
         .child(label)
 }
-
-fn shortcut_row(action: &'static str, shortcut: &'static str) -> gpui::Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .child(div().text_color(rgb(theme_text())).child(action))
-        .child(
-            div()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgb(text_muted()))
-                .child(shortcut),
-        )
-}

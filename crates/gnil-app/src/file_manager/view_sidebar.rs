@@ -507,11 +507,7 @@ impl FileManager {
                     .justify_between()
                     .cursor_pointer()
                     .text_sm()
-                    .text_color(if self.settings_open {
-                        rgb(accent())
-                    } else {
-                        rgb(theme_text())
-                    })
+                    .text_color(rgb(theme_text()))
                     .hover(|style| style.bg(rgb(border())))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_settings(&ToggleSettings, window, cx);

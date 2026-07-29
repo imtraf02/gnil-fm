@@ -15,6 +15,7 @@ crossbeam-channel.workspace = true
 dirs.workspace = true
 globset.workspace = true
 futures-lite.workspace = true
+freedesktop-desktop-entry.workspace = true
 gnil-core = { path = "../gnil-core" }
 gnil-clipboard = { path = "../gnil-clipboard" }
 gnil-fs = { path = "../gnil-fs" }

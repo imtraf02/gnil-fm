@@ -98,6 +98,7 @@ pub(crate) struct RubberBandState {
     pub(crate) merge: SelectionMerge,
     pub(crate) crossed_threshold: bool,
     pub(crate) hit_span: Option<RangeInclusive<usize>>,
+    pub(crate) hit_indices: Option<Vec<usize>>,
     pub(crate) autoscroll_scheduled: bool,
 }
 
@@ -183,6 +184,7 @@ pub(crate) fn movement_crossed_threshold(origin: Point<Pixels>, current: Point<P
 
 #[must_use]
 #[allow(
+    clippy::too_many_arguments,
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
@@ -228,16 +230,71 @@ pub(crate) fn rubber_highlighted(state: &RubberBandState, index: usize, entry: &
     if !state.crossed_threshold {
         return state.baseline.is_highlighted(index, entry);
     }
-    let hit = state
-        .hit_span
-        .as_ref()
-        .is_some_and(|span| span.contains(&index));
+    let hit = state.hit_indices.as_ref().map_or_else(
+        || {
+            state
+                .hit_span
+                .as_ref()
+                .is_some_and(|span| span.contains(&index))
+        },
+        |indices| indices.binary_search(&index).is_ok(),
+    );
     let baseline = state.baseline.is_highlighted(index, entry);
     match state.merge {
         SelectionMerge::Replace => hit,
         SelectionMerge::Union => baseline || hit,
         SelectionMerge::Toggle => baseline ^ hit,
     }
+}
+
+#[must_use]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+pub(crate) fn grid_band_indices(
+    origin_x: f32,
+    current_x: f32,
+    origin_y: f32,
+    current_y: f32,
+    card_width: f32,
+    card_gap: f32,
+    horizontal_padding: f32,
+    row_height: f32,
+    columns: usize,
+    item_count: usize,
+) -> Vec<usize> {
+    if item_count == 0 || columns == 0 || card_width <= 0.0 || row_height <= 0.0 {
+        return Vec::new();
+    }
+    let left = origin_x.min(current_x);
+    let right = origin_x.max(current_x);
+    let top = origin_y.min(current_y);
+    let bottom = origin_y.max(current_y);
+    let row_count = item_count.div_ceil(columns);
+    let first_row = (top.max(0.0) / row_height).floor() as usize;
+    let last_row =
+        ((bottom.max(0.0) / row_height).floor() as usize).min(row_count.saturating_sub(1));
+    if first_row >= row_count || bottom < 0.0 {
+        return Vec::new();
+    }
+
+    let mut indices = Vec::new();
+    for row in first_row..=last_row {
+        for column in 0..columns {
+            let card_left = horizontal_padding + column as f32 * (card_width + card_gap);
+            let card_right = card_left + card_width;
+            if right >= card_left && left <= card_right {
+                let index = row * columns + column;
+                if index < item_count {
+                    indices.push(index);
+                }
+            }
+        }
+    }
+    indices
 }
 
 pub(crate) fn internal_drop_intent(
@@ -338,6 +395,17 @@ mod tests {
         assert_eq!(band_span(365.0, 75.0, 36.0, 100_000, true), Some(2..=10));
         assert_eq!(band_span(-40.0, 40.0, 36.0, 5, true), Some(0..=1));
         assert_eq!(band_span(10.0, 40.0, 36.0, 5, false), None);
+    }
+
+    #[test]
+    fn grid_band_returns_only_intersecting_cards() {
+        assert_eq!(
+            grid_band_indices(10.0, 180.0, 10.0, 210.0, 150.0, 10.0, 12.0, 190.0, 3, 8),
+            vec![0, 1, 3, 4]
+        );
+        assert!(
+            grid_band_indices(-40.0, -10.0, 0.0, 100.0, 150.0, 10.0, 12.0, 190.0, 3, 8).is_empty()
+        );
     }
 
     #[test]

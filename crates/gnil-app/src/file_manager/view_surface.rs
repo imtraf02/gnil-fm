@@ -2,6 +2,7 @@
 enum FileManagerSurfaceKind {
     Sidebar,
     Header,
+    CommandBar,
     FileList,
     RubberBand,
     Preview,
@@ -9,9 +10,10 @@ enum FileManagerSurfaceKind {
 }
 
 impl FileManagerSurfaceKind {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Sidebar,
         Self::Header,
+        Self::CommandBar,
         Self::FileList,
         Self::RubberBand,
         Self::Preview,
@@ -23,10 +25,11 @@ impl FileManagerSurfaceKind {
         match self {
             Self::Sidebar => 0,
             Self::Header => 1,
-            Self::FileList => 2,
-            Self::RubberBand => 3,
-            Self::Preview => 4,
-            Self::Status => 5,
+            Self::CommandBar => 2,
+            Self::FileList => 3,
+            Self::RubberBand => 4,
+            Self::Preview => 5,
+            Self::Status => 6,
         }
     }
 
@@ -34,11 +37,45 @@ impl FileManagerSurfaceKind {
         match self {
             Self::Sidebar => "sidebar",
             Self::Header => "header",
+            Self::CommandBar => "command_bar",
             Self::FileList => "list",
             Self::RubberBand => "rubber",
             Self::Preview => "preview",
             Self::Status => "status",
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SurfaceMask(u8);
+
+impl SurfaceMask {
+    const SIDEBAR: Self = Self(1 << 0);
+    const HEADER: Self = Self(1 << 1);
+    const COMMAND_BAR: Self = Self(1 << 2);
+    const FILE_LIST: Self = Self(1 << 3);
+    const RUBBER_BAND: Self = Self(1 << 4);
+    const PREVIEW: Self = Self(1 << 5);
+    const STATUS: Self = Self(1 << 6);
+    const NAVIGATION: Self = Self(
+        Self::SIDEBAR.0
+            | Self::HEADER.0
+            | Self::COMMAND_BAR.0
+            | Self::FILE_LIST.0
+            | Self::PREVIEW.0
+            | Self::STATUS.0,
+    );
+
+    const fn contains(self, kind: FileManagerSurfaceKind) -> bool {
+        self.0 & (1 << kind.index()) != 0
+    }
+}
+
+impl std::ops::BitOr for SurfaceMask {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
     }
 }
 
@@ -68,21 +105,22 @@ impl Render for FileManagerSurface {
         }
         self.owner
             .update(cx, |owner, owner_cx| {
-                let started = Instant::now();
+                let started = owner.perf_trace.start();
                 let element = match self.kind {
                     FileManagerSurfaceKind::Sidebar => owner.render_sidebar(owner_cx),
-                    FileManagerSurfaceKind::Header => owner.render_header(owner_cx),
+                    FileManagerSurfaceKind::Header => owner.render_header(window, owner_cx),
+                    FileManagerSurfaceKind::CommandBar => {
+                        owner.render_command_bar(window, owner_cx)
+                    }
                     FileManagerSurfaceKind::FileList => {
                         let list_focused = owner.focus_handle.is_focused(window);
-                        owner.render_file_list(list_focused, owner_cx)
+                        owner.render_file_list(list_focused, window, owner_cx)
                     }
                     FileManagerSurfaceKind::RubberBand => owner.render_rubber_band(),
                     FileManagerSurfaceKind::Preview => owner.render_preview(),
                     FileManagerSurfaceKind::Status => owner.render_status(owner_cx),
                 };
-                owner
-                    .perf_trace
-                    .record_surface(self.kind, started.elapsed());
+                owner.perf_trace.record_surface(self.kind, started);
                 element
             })
             .unwrap_or_else(|_| div().into_any_element())
@@ -93,6 +131,7 @@ impl Render for FileManagerSurface {
 struct FileManagerSurfaces {
     sidebar: Entity<FileManagerSurface>,
     header: Entity<FileManagerSurface>,
+    command_bar: Entity<FileManagerSurface>,
     file_list: Entity<FileManagerSurface>,
     rubber_band: Entity<FileManagerSurface>,
     preview: Entity<FileManagerSurface>,
@@ -100,13 +139,8 @@ struct FileManagerSurfaces {
 }
 
 impl FileManagerSurfaces {
-    fn install(cx: &mut Context<FileManager>) -> (Self, Subscription) {
-        let surfaces = Self::new(&cx.weak_entity(), cx);
-        let surfaces_for_observer = surfaces.clone();
-        let subscription = cx.observe_self(move |_, cx| {
-            surfaces_for_observer.invalidate_all(cx);
-        });
-        (surfaces, subscription)
+    fn install(cx: &mut Context<FileManager>) -> Self {
+        Self::new(&cx.weak_entity(), cx)
     }
 
     fn new(owner: &gpui::WeakEntity<FileManager>, cx: &mut Context<FileManager>) -> Self {
@@ -117,6 +151,7 @@ impl FileManagerSurfaces {
         Self {
             sidebar: surface(FileManagerSurfaceKind::Sidebar, cx),
             header: surface(FileManagerSurfaceKind::Header, cx),
+            command_bar: surface(FileManagerSurfaceKind::CommandBar, cx),
             file_list: surface(FileManagerSurfaceKind::FileList, cx),
             rubber_band: surface(FileManagerSurfaceKind::RubberBand, cx),
             preview: surface(FileManagerSurfaceKind::Preview, cx),
@@ -124,25 +159,20 @@ impl FileManagerSurfaces {
         }
     }
 
-    fn invalidate_all(&self, cx: &mut Context<FileManager>) {
-        for surface in [
-            &self.sidebar,
-            &self.header,
-            &self.file_list,
-            &self.rubber_band,
-            &self.preview,
-            &self.status,
+    fn invalidate(&self, mask: SurfaceMask, cx: &mut Context<FileManager>) {
+        for (kind, surface) in [
+            (FileManagerSurfaceKind::Sidebar, &self.sidebar),
+            (FileManagerSurfaceKind::Header, &self.header),
+            (FileManagerSurfaceKind::CommandBar, &self.command_bar),
+            (FileManagerSurfaceKind::FileList, &self.file_list),
+            (FileManagerSurfaceKind::RubberBand, &self.rubber_band),
+            (FileManagerSurfaceKind::Preview, &self.preview),
+            (FileManagerSurfaceKind::Status, &self.status),
         ] {
-            surface.update(cx, |_, cx| cx.notify());
+            if mask.contains(kind) {
+                surface.update(cx, |_, cx| cx.notify());
+            }
         }
-    }
-
-    fn invalidate_file_list(&self, cx: &mut Context<FileManager>) {
-        self.file_list.update(cx, |_, cx| cx.notify());
-    }
-
-    fn invalidate_rubber_band(&self, cx: &mut Context<FileManager>) {
-        self.rubber_band.update(cx, |_, cx| cx.notify());
     }
 
     fn sidebar(&self) -> AnyView {
@@ -173,6 +203,15 @@ impl FileManagerSurfaces {
         )
     }
 
+    fn command_bar(&self) -> AnyView {
+        AnyView::from(self.command_bar.clone()).cached(
+            StyleRefinement::default()
+                .h(px(44.0))
+                .w_full()
+                .flex_none(),
+        )
+    }
+
     fn rubber_band(&self) -> AnyView {
         AnyView::from(self.rubber_band.clone()).cached(
             StyleRefinement::default()
@@ -200,5 +239,12 @@ impl FileManagerSurfaces {
                 .w_full()
                 .flex_none(),
         )
+    }
+}
+
+impl FileManager {
+    fn invalidate_surfaces(&mut self, mask: SurfaceMask, cx: &mut Context<Self>) {
+        self.perf_trace.record_invalidation(mask);
+        self.surfaces.invalidate(mask, cx);
     }
 }

@@ -1,4 +1,8 @@
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use crate::FileEntry;
 
@@ -223,14 +227,6 @@ impl SelectionState {
     }
 
     pub fn retain_existing(&mut self, entries: &[FileEntry]) -> bool {
-        let existing: HashSet<_> = entries.iter().map(|entry| entry.path.clone()).collect();
-        let mut selected_paths = self.selected_paths.as_ref().clone();
-        selected_paths.retain(|path| existing.contains(path));
-        let selection_changed = *self.selected_paths != selected_paths;
-        if selection_changed {
-            self.selected_paths = Arc::new(selected_paths);
-            self.bump_selected_revision();
-        }
         let previous_cursor = self.cursor;
         let previous_anchor = self.anchor;
         if self.cursor.is_some_and(|index| index >= entries.len()) {
@@ -238,6 +234,18 @@ impl SelectionState {
         }
         if self.anchor.is_some_and(|index| index >= entries.len()) {
             self.anchor = self.cursor;
+        }
+        if self.selected_paths.is_empty() {
+            return self.cursor != previous_cursor || self.anchor != previous_anchor;
+        }
+
+        let existing: HashSet<&Path> = entries.iter().map(|entry| entry.path.as_path()).collect();
+        let mut selected_paths = self.selected_paths.as_ref().clone();
+        selected_paths.retain(|path| existing.contains(path.as_path()));
+        let selection_changed = *self.selected_paths != selected_paths;
+        if selection_changed {
+            self.selected_paths = Arc::new(selected_paths);
+            self.bump_selected_revision();
         }
         selection_changed || self.cursor != previous_cursor || self.anchor != previous_anchor
     }

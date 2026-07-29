@@ -1,6 +1,7 @@
 mod action_menu;
 mod device_refresh;
 mod empty_space_menu;
+mod open_with;
 mod pointer_interaction;
 mod ui;
 

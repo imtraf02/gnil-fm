@@ -174,6 +174,7 @@ impl FileManager {
                     .flex()
                     .flex_col()
                     .child(self.surfaces.header())
+                    .child(self.surfaces.command_bar())
                     .child(
                         div()
                             .flex_1()
@@ -207,33 +208,48 @@ impl Focusable for FileManager {
 
 impl Render for FileManager {
     #[allow(clippy::too_many_lines)]
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let started = Instant::now();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let started = self.perf_trace.start();
         let root = div()
             .id("gnil-root")
             .relative()
             .key_context(
-                if !matches!(&self.pointer_interaction, PointerInteraction::Idle) {
+                if self.open_with_chooser.is_some() {
+                    "OpenWithChooser"
+                } else if self.column_resize.is_some()
+                    || !matches!(&self.pointer_interaction, PointerInteraction::Idle)
+                {
                     "PointerInteraction"
                 } else if self.action_menu.is_some()
                     || self.empty_space_menu.is_some()
                     || self.appearance_menu_open
+                    || self.command_bar_menu.is_some()
                 {
                     "ActionMenu"
                 } else {
-                    match self.keymap {
-                        KeymapProfile::Desktop => "FileManager",
-                        KeymapProfile::Yazi => "YaziFileManager",
-                    }
+                    "FileManager"
                 },
             )
             .track_focus(&self.focus_handle(cx))
+            .when(self.column_resize.is_some(), |root| {
+                root.cursor(CursorStyle::ResizeLeftRight)
+            })
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
+            .on_action(cx.listener(Self::select_left))
+            .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::select_next_range))
             .on_action(cx.listener(Self::select_previous_range))
+            .on_action(cx.listener(Self::select_left_range))
+            .on_action(cx.listener(Self::select_right_range))
             .on_action(cx.listener(Self::toggle_selection))
             .on_action(cx.listener(Self::open_selected))
+            .on_action(cx.listener(Self::open_with_selected))
+            .on_action(cx.listener(Self::confirm_open_with))
+            .on_action(cx.listener(Self::dismiss_open_with))
+            .on_action(cx.listener(Self::open_with_next))
+            .on_action(cx.listener(Self::open_with_previous))
+            .on_action(cx.listener(Self::toggle_open_with_default))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
             .on_action(cx.listener(Self::go_up))
@@ -249,6 +265,8 @@ impl Render for FileManager {
             .on_action(cx.listener(Self::open_create_symlink))
             .on_action(cx.listener(Self::open_permissions))
             .on_action(cx.listener(Self::open_rename))
+            .on_action(cx.listener(Self::confirm_inline_rename))
+            .on_action(cx.listener(Self::cancel_inline_rename))
             .on_action(cx.listener(Self::extract_selected))
             .on_action(cx.listener(Self::extract_selected_to))
             .on_action(cx.listener(Self::cancel_operation))
@@ -290,7 +308,7 @@ impl Render for FileManager {
                 this.select_all_entries(cx);
             }))
             .on_action(cx.listener(Self::toggle_settings))
-            .on_action(cx.listener(Self::dismiss_settings))
+            .on_action(cx.listener(Self::open_keymap))
             .on_any_mouse_down(cx.listener(
                 |this, _: &MouseDownEvent, window, cx| {
                     if this.file_search.open {
@@ -317,26 +335,27 @@ impl Render for FileManager {
             .when(
                 self.action_menu.is_some()
                     || self.empty_space_menu.is_some()
-                    || self.appearance_menu_open,
+                    || self.appearance_menu_open
+                    || self.command_bar_menu.is_some(),
                 |root| root.child(Self::render_context_menu_backdrop(cx)),
             )
             .when(self.empty_space_menu.is_some(), |root| {
-                root.child(self.render_empty_space_menu(cx))
+                root.child(self.render_empty_space_menu(window, cx))
             })
             .when(
                 matches!(
                     self.action_menu.as_ref().map(|menu| menu.placement),
                     Some(ActionMenuPlacement::Cursor(_))
                 ),
-                |root| root.child(self.render_context_action_menu(cx)),
+                |root| root.child(self.render_context_action_menu(window, cx)),
             )
             .when(self.operation_sheet.is_some(), |root| {
                 root.child(self.render_operation_sheet(cx))
             })
-            .when(self.settings_open, |root| {
-                root.child(self.render_settings_dialog(cx))
+            .when(self.open_with_chooser.is_some(), |root| {
+                root.child(self.render_open_with_chooser(cx))
             });
-        self.perf_trace.record_root(started.elapsed());
+        self.perf_trace.record_root(started);
         root
     }
 }

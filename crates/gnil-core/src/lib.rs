@@ -21,7 +21,10 @@ pub use operation::{
     TrashEntryRef, UndoKind, UndoRecord,
 };
 pub use selection::{SelectionMerge, SelectionState};
-pub use settings::{AppSettings, ConfigPaths, KeymapProfile, ThemeMode};
+pub use settings::{
+    AppSettings, ConfigPaths, DetailsColumnWidths, FileLayout, KeymapBinding, KeymapBindingKind,
+    KeymapOverrides, LoadedSettings, ThemeMode,
+};
 pub use tab::{TabLocation, TabRoot, TabState};
 pub use theme::{
     LoadedTheme, ThemeAppearance, ThemeCatalog, ThemeColorOverrides, ThemeColors, ThemeFile,

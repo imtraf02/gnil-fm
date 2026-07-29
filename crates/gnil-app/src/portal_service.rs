@@ -304,7 +304,7 @@ pub fn run() -> anyhow::Result<()> {
 
     Application::new()
         .with_assets(PickerAssets)
-        .quit_when_last_window_closed(false)
+        .with_quit_policy(gpui::QuitPolicy::Explicit)
         .run(move |cx| {
             picker::bind_keys(cx);
             picker::run_command_loop(ui_rx, cx);

@@ -122,6 +122,12 @@ impl TextInput {
         cx.notify();
     }
 
+    pub fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        self.selected_range = self.valid_range(range);
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
     pub fn replace_selection(&mut self, value: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_text_in_range(None, value, window, cx);
     }
@@ -474,7 +480,6 @@ impl Element for TextElement {
     fn request_layout(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
@@ -487,7 +492,6 @@ impl Element for TextElement {
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
         (): &mut (),
         window: &mut Window,
@@ -584,7 +588,6 @@ impl Element for TextElement {
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
         (): &mut (),
         state: &mut PrepaintState,
@@ -682,7 +685,13 @@ impl Focusable for TextInput {
 }
 
 pub fn bind_keys(cx: &mut App) {
-    for context in ["TextInput", "PathInput", "SearchInput"] {
+    for context in [
+        "TextInput",
+        "PathInput",
+        "SearchInput",
+        "OpenWithInput",
+        "InlineRenameInput",
+    ] {
         cx.bind_keys([
             KeyBinding::new("backspace", Backspace, Some(context)),
             KeyBinding::new("delete", Delete, Some(context)),

@@ -1,16 +1,16 @@
-impl FileManager {
+impl PreferencesWindow {
     #[allow(clippy::too_many_lines)]
-    fn render_settings_dialog(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_settings_workspace(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let category = self.settings_category;
 
         let sidebar = div()
-            .w(px(210.0))
+            .w(px(232.0))
             .h_full()
             .flex_none()
             .flex()
             .flex_col()
             .gap_1()
-            .p_3()
+            .p_4()
             .border_r_1()
             .border_color(rgb(border()))
             .bg(rgb(surface_elevated()))
@@ -52,29 +52,29 @@ impl FileManager {
                 cx,
             ));
 
-        let content = match category {
-            SettingsCategory::Appearance => self.render_settings_appearance(cx),
-            SettingsCategory::Keymap => self.render_settings_keymap(cx),
-            SettingsCategory::FileView => self.render_settings_file_view(cx),
-            SettingsCategory::Performance => self.render_settings_performance(cx),
+        let query = self.settings_search.read(cx).text().trim().to_ascii_lowercase();
+        let content = if query.is_empty() {
+            match category {
+                SettingsCategory::Appearance => self.render_settings_appearance(cx),
+                SettingsCategory::Keymap => self.render_settings_keymap(cx),
+                SettingsCategory::FileView => self.render_settings_file_view(cx),
+                SettingsCategory::Performance => self.render_settings_performance(cx),
+            }
+        } else {
+            Self::render_settings_search_results(&query, cx)
         };
 
-        let dialog_box = div()
-            .w(px(760.0))
-            .max_w(px(840.0))
-            .h(px(540.0))
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(border()))
-            .bg(rgb(surface()))
-            .shadow_lg()
+        let workspace = div()
+            .id("settings-workspace")
+            .size_full()
+            .relative()
+            .bg(rgb(background()))
             .flex()
             .flex_col()
-            .overflow_hidden()
             .child(
                 div()
-                    .h(px(54.0))
-                    .px_5()
+                    .h(px(58.0))
+                    .px_4()
                     .flex()
                     .items_center()
                     .justify_between()
@@ -85,6 +85,31 @@ impl FileManager {
                             .flex()
                             .items_center()
                             .gap_2()
+                            .child(
+                                div()
+                                    .id("dismiss-settings")
+                                    .with_focus_ring()
+                                    .size_7()
+                                    .rounded_md()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .text_color(rgb(text_muted()))
+                                    .hover(|style| {
+                                        style
+                                            .bg(rgb(border()))
+                                            .text_color(rgb(text_emphasized()))
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.dismiss_settings(&DismissSettings, window, cx);
+                                    }))
+                                    .child(ui_icon(
+                                        "icons/action-back.svg",
+                                        IconSize::Small,
+                                        IconTone::Muted,
+                                    )),
+                            )
                             .child(
                                 div()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -106,73 +131,49 @@ impl FileManager {
                     )
                     .child(
                         div()
-                            .id("dismiss-settings")
-                            .with_focus_ring()
-                            .size_8()
-                            .rounded_md()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(border())))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.dismiss_settings(&DismissSettings, window, cx);
-                            }))
-                            .child(ui_icon(
-                                "icons/action-close.svg",
-                                IconSize::Small,
-                                IconTone::Muted,
-                            )),
+                            .w(px(300.0))
+                            .child(self.settings_search.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(text_muted()))
+                            .child("Preferences"),
                     ),
             )
             .child(
-                div().flex_1().min_h_0().flex().child(sidebar).child(
-                    div()
-                        .id("settings-content-scroll")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .p_6()
-                        .child(content),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(sidebar)
+                    .child(
+                        div()
+                            .id("settings-content-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p_6()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(900.0))
+                                    .flex()
+                                    .flex_col()
+                                    .child(content),
+                            ),
                     ),
             );
-        let dialog_box = animate_overlay(
-            dialog_box,
-            if self.settings_closing {
-                OverlayMotionState::Closing
-            } else {
-                OverlayMotionState::Opening
-            },
-            self.reduced_motion,
-            3.0,
-        );
+        let keymap_edit_sheet = self.render_keymap_edit_sheet(cx);
+        let keymap_conflict_sheet = self.render_keymap_conflict_sheet(cx);
 
-        deferred(
-            div()
-                .id("settings-modal-backdrop")
-                .absolute()
-                .inset_0()
-                .occlude()
-                .bg(Hsla::from(rgb(background())).opacity(0.65))
-                .flex()
-                .items_center()
-                .justify_center()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| {
-                        this.dismiss_settings(&DismissSettings, window, cx);
-                    }),
-                )
-                .child(
-                    div()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .child(dialog_box),
-                ),
-        )
-        .with_priority(MODAL_PRIORITY)
-        .into_any_element()
+        div()
+            .size_full()
+            .relative()
+            .child(workspace)
+            .child(keymap_edit_sheet)
+            .child(keymap_conflict_sheet)
+            .into_any_element()
     }
 
     fn settings_nav_item(
@@ -205,6 +206,8 @@ impl FileManager {
             .with_focus_ring()
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.settings_category = cat;
+                this.settings_search
+                    .update(cx, |input, cx| input.set_text("", cx));
                 cx.notify();
             }))
             .child(ui_icon(
@@ -217,6 +220,74 @@ impl FileManager {
                 },
             ))
             .child(label)
+    }
+
+    fn render_settings_search_results(query: &str, cx: &mut Context<Self>) -> AnyElement {
+        const SETTINGS: &[(SettingsCategory, &str, &str)] = &[
+            (SettingsCategory::Appearance, "Theme Mode", "Light, Dark, or System"),
+            (SettingsCategory::Appearance, "Reduced Motion", "Minimize interface animation"),
+            (SettingsCategory::Keymap, "Keymap & Controls", "Search and customize shortcuts"),
+            (SettingsCategory::FileView, "Show Hidden Files", "Display hidden entries"),
+            (SettingsCategory::FileView, "Hide Gitignored Files", "Filter ignored files"),
+            (SettingsCategory::FileView, "Preview Panel", "Show file previews"),
+            (SettingsCategory::FileView, "Auto-mount Removable Drives", "Mount external drives"),
+            (SettingsCategory::Performance, "Worker Threads", "Background scan concurrency"),
+            (SettingsCategory::Performance, "Preview Cache", "Memory used for previews"),
+        ];
+        let matches = SETTINGS
+            .iter()
+            .copied()
+            .filter(|(_, label, description)| {
+                format!("{label} {description}").to_ascii_lowercase().contains(query)
+            })
+            .collect::<Vec<_>>();
+        let empty = matches.is_empty();
+        let rows = matches.into_iter().enumerate().map(|(index, (category, label, description))| {
+            div()
+                .id(("settings-search-result", index))
+                .h(px(52.0))
+                .px_3()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(border()))
+                .bg(rgb(surface_elevated()))
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .hover(|row| row.bg(rgb(border())))
+                .with_focus_ring()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings_category = category;
+                    this.settings_search.update(cx, |input, cx| input.set_text("", cx));
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child(label))
+                        .child(div().text_xs().text_color(rgb(text_muted())).child(description)),
+                )
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(setting_section_header("Search Preferences", "Matching settings and controls"))
+            .when(empty, |view| {
+                view.child(
+                    div()
+                        .p_5()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(border()))
+                        .text_sm()
+                        .text_color(rgb(text_muted()))
+                        .child("No preferences match this search."),
+                )
+            })
+            .children(rows)
+            .into_any_element()
     }
 
     fn render_settings_appearance(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -279,66 +350,7 @@ impl FileManager {
     }
 
     fn render_settings_keymap(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let profile = self.settings.keymap;
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_6()
-            .child(setting_section_header(
-                "Keymap & Controls",
-                "Choose keyboard profile and review shortcuts",
-            ))
-            .child(setting_row(
-                "Keymap Profile",
-                "Desktop (standard shortcuts) or Yazi (vi modal navigation)",
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        setting_chip("Desktop", profile == KeymapProfile::Desktop).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.keymap = KeymapProfile::Desktop;
-                                this.save_and_apply_settings(cx);
-                            }),
-                        ),
-                    )
-                    .child(
-                        setting_chip("Yazi (Vi)", profile == KeymapProfile::Yazi).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.keymap = KeymapProfile::Yazi;
-                                this.save_and_apply_settings(cx);
-                            }),
-                        ),
-                    ),
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(field_label("SHORTCUT REFERENCE"))
-                    .child(
-                        div()
-                            .p_3()
-                            .rounded_lg()
-                            .bg(rgb(surface_elevated()))
-                            .border_1()
-                            .border_color(rgb(border()))
-                            .flex()
-                            .flex_col()
-                            .gap_1p5()
-                            .text_xs()
-                            .child(shortcut_row("Open Settings", "Ctrl+,"))
-                            .child(shortcut_row("Toggle Hidden Files", "Ctrl+H"))
-                            .child(shortcut_row("Toggle Favorite", "Ctrl+D"))
-                            .child(shortcut_row("Toggle Preview Panel", "Ctrl+P / F3"))
-                            .child(shortcut_row("Move to Trash", "Del / d"))
-                            .child(shortcut_row("Undo Operation", "Ctrl+Z / u"))
-                            .child(shortcut_row("Copy Absolute Path", "Ctrl+Shift+C")),
-                    ),
-            )
-            .into_any_element()
+        self.render_keymap_editor(cx)
     }
 
     fn render_settings_file_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -364,7 +376,6 @@ impl FileManager {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.settings.show_hidden = !this.settings.show_hidden;
                         this.save_and_apply_settings(cx);
-                        this.load_directory(cx);
                     }))
                     .child(setting_switch(show_hidden)),
             ))
@@ -377,7 +388,6 @@ impl FileManager {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.settings.hide_gitignored = !this.settings.hide_gitignored;
                         this.save_and_apply_settings(cx);
-                        this.load_directory(cx);
                     }))
                     .child(setting_switch(hide_gitignored)),
             ))
@@ -515,5 +525,112 @@ impl FileManager {
                     ),
             )
             .into_any_element()
+    }
+
+    fn new(preferences: &Entity<PreferencesState>, cx: &mut Context<Self>) -> Self {
+        let preferences = preferences.clone();
+        let (settings, config_paths, keymap_overrides, keymap_error) = {
+            let snapshot = preferences.read(cx);
+            (
+                snapshot.settings.clone(),
+                snapshot.config_paths.clone(),
+                snapshot.keymap.clone(),
+                snapshot.keymap_error.clone(),
+            )
+        };
+        let settings_search = cx.new(|cx| {
+            TextInput::new("Search preferences", "", cx)
+                .with_leading_icon("icons/action-search.svg")
+        });
+        let settings_search_subscription = cx.subscribe(&settings_search, |_, _, _, cx| cx.notify());
+        let (keymap_search, keymap_search_subscription) = Self::create_keymap_search(cx);
+        let mut window = Self {
+            focus_handle: cx.focus_handle(),
+            preferences: preferences.clone(),
+            settings,
+            config_paths,
+            keymap_overrides,
+            keymap_error,
+            settings_category: SettingsCategory::Appearance,
+            settings_search,
+            _settings_search_subscription: settings_search_subscription,
+            keymap_search,
+            _keymap_search_subscription: keymap_search_subscription,
+            keymap_capture_subscription: None,
+            keymap_edit: None,
+            keymap_conflict: None,
+            preferences_subscription: None,
+            reduced_motion: false,
+        };
+        window.reduced_motion = window.settings.reduced_motion;
+        window.keymap_capture_subscription = Some(Self::install_keymap_capture(cx));
+        window.preferences_subscription = Some(cx.observe(&preferences, |this, state, cx| {
+            let state = state.read(cx);
+            this.settings = state.settings.clone();
+            this.keymap_overrides = state.keymap.clone();
+            this.keymap_error.clone_from(&state.keymap_error);
+            this.reduced_motion = this.settings.reduced_motion;
+            cx.notify();
+        }));
+        window
+    }
+
+    fn save_and_apply_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings.normalize();
+        let settings = self.settings.clone();
+        let result = self.preferences.update(cx, |preferences, cx| {
+            let result = preferences.save_settings(settings);
+            cx.notify();
+            result
+        });
+        if let Err(error) = result {
+            self.keymap_error = Some(format!("Could not save settings: {error}"));
+        }
+        self.reduced_motion = self.settings.reduced_motion;
+        cx.notify();
+    }
+
+    fn dismiss_settings(
+        &mut self,
+        _: &DismissSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.keymap_edit.is_some() || self.keymap_conflict.is_some() {
+            self.cancel_keymap_edit(cx);
+            return;
+        }
+        cx.global_mut::<PreferencesRegistry>().window = None;
+        self.keymap_edit = None;
+        self.keymap_conflict = None;
+        window.remove_window();
+    }
+
+    fn focus_settings_search(
+        &mut self,
+        _: &FocusSettingsSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.settings_search.read(cx).focus_handle(cx));
+    }
+}
+
+impl Focusable for PreferencesWindow {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for PreferencesWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("preferences-window-root")
+            .size_full()
+            .key_context("PreferencesWindow")
+            .track_focus(&self.focus_handle(cx))
+            .on_action(cx.listener(Self::dismiss_settings))
+            .on_action(cx.listener(Self::focus_settings_search))
+            .child(self.render_settings_workspace(cx))
     }
 }

@@ -3,6 +3,7 @@ impl FileManager {
     fn render_trash_list(
         &mut self,
         list_focused: bool,
+        _window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selection = self.selection.clone();
@@ -10,12 +11,16 @@ impl FileManager {
             PointerInteraction::RubberBand(state) => Some(state.clone()),
             _ => None,
         };
-        let entries = Arc::new(self.trash_entries.clone());
+        let entries = Arc::clone(&self.trash_entries);
         let count = entries.len();
         if count == 0 {
             self.rendered_file_range = 0..0;
         }
-        let has_selection = self.selection.selected_count() > 0;
+        let name_column_width = self.detail_column_width(DetailColumn::TrashName);
+        let deleted_column_width = self.detail_column_width(DetailColumn::TrashDeleted);
+        let location_column_width = self.detail_column_width(DetailColumn::TrashLocation);
+        let row_surface_width =
+            name_column_width + deleted_column_width + location_column_width + 16.0;
         let body = if count == 0 {
             div()
                 .flex_1()
@@ -51,6 +56,7 @@ impl FileManager {
                 count,
                 cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                     this.rendered_file_range = range.clone();
+                    this.perf_trace.record_rows_rendered(range.len());
                     range
                         .map(|index| {
                             let entry = entries[index].clone();
@@ -63,7 +69,7 @@ impl FileManager {
                                 list_focused && selection.cursor == Some(index);
                             let row = div()
                                 .id(("trash-entry", stable_path_id(&file_entry.path)))
-                                .w_full()
+                                .w(px(row_surface_width))
                                 .h(px(TRASH_ROW_HEIGHT))
                                 .px_2()
                                 .rounded_md()
@@ -91,16 +97,30 @@ impl FileManager {
                                     }),
                                 )
                                 .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                                    this.select_from_click(index, event, cx);
+                                    this.select_from_click(index, event, true, cx);
                                     if event.click_count() >= 2 {
                                         this.open_index(index, cx);
                                     }
                                 }))
-                                .child(file_icon(&file_entry))
-                                .child(div().flex_1().min_w_0().truncate().child(entry.name))
                                 .child(
                                     div()
-                                        .w(px(142.0))
+                                        .w(px(name_column_width))
+                                        .min_w_0()
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .child(file_icon(&file_entry))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(entry.name),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(deleted_column_width))
                                         .flex_none()
                                         .text_xs()
                                         .text_color(rgb(text_muted()))
@@ -108,7 +128,7 @@ impl FileManager {
                                 )
                                 .child(
                                     div()
-                                        .w(px(280.0))
+                                        .w(px(location_column_width))
                                         .flex_none()
                                         .truncate()
                                         .text_xs()
@@ -120,6 +140,7 @@ impl FileManager {
                         .collect()
                 }),
             )
+            .item_height(px(TRASH_ROW_HEIGHT))
             .track_scroll(self.file_list_scroll.clone())
             .h_full()
             .into_any_element()
@@ -133,38 +154,6 @@ impl FileManager {
             .flex_col()
             .child(
                 div()
-                    .h(px(42.0))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(rgb(border()))
-                    .child(
-                        trash_action_button("Restore", false, has_selection).on_click(cx.listener(
-                            |this, _, window, cx| {
-                                this.restore_trash_selected(&RestoreTrashSelected, window, cx);
-                            },
-                        )),
-                    )
-                    .child(
-                        trash_action_button("Delete Permanently", true, has_selection).on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.purge_selected_trash(window, cx);
-                            }),
-                        ),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        trash_action_button("Empty Trash", true, count > 0).on_click(cx.listener(
-                            |this, _, window, cx| {
-                                this.empty_trash(&EmptyTrash, window, cx);
-                            },
-                        )),
-                    ),
-            )
-            .child(
-                div()
                     .h(px(32.0))
                     .px_4()
                     .flex()
@@ -173,9 +162,39 @@ impl FileManager {
                     .border_color(rgb(border()))
                     .text_xs()
                     .text_color(rgb(text_muted()))
-                    .child(div().flex_1().child("NAME"))
-                    .child(div().w(px(142.0)).flex_none().child("DELETED"))
-                    .child(div().w(px(280.0)).flex_none().child("ORIGINAL LOCATION")),
+                    .child(
+                        div()
+                            .relative()
+                            .w(px(name_column_width))
+                            .flex_none()
+                            .child("NAME")
+                            .child(Self::render_column_resize_handle(
+                                DetailColumn::TrashName,
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .w(px(deleted_column_width))
+                            .flex_none()
+                            .child("DATE DELETED")
+                            .child(Self::render_column_resize_handle(
+                                DetailColumn::TrashDeleted,
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .w(px(location_column_width))
+                            .flex_none()
+                            .child("ORIGINAL LOCATION")
+                            .child(Self::render_column_resize_handle(
+                                DetailColumn::TrashLocation,
+                                cx,
+                            )),
+                    ),
             )
             .child(
                 div()

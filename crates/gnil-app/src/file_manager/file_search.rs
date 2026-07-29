@@ -28,7 +28,7 @@ impl FileManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.operation_sheet.is_some() || self.settings_open {
+        if self.open_with_chooser.is_some() || self.operation_sheet.is_some() {
             return;
         }
         if self.path_input.editing {
@@ -39,6 +39,7 @@ impl FileManager {
         }
         self.action_menu = None;
         self.empty_space_menu = None;
+        self.command_bar_menu = None;
         self.appearance_menu_open = false;
         if self.tab.root == TabRoot::Trash {
             self.file_search.scope = FileSearchScope::Home;

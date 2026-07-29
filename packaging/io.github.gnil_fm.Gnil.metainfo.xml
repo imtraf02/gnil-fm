@@ -7,7 +7,8 @@
   <project_license>MIT</project_license>
   <description>
     <p>gnil is a native Rust file manager for Wayland with fast navigation,
-    bounded previews, safe file operations, and optional Yazi-style keys.</p>
+    bounded previews, safe file operations, an XDG-aware Open With chooser,
+    and customizable keyboard shortcuts.</p>
   </description>
   <launchable type="desktop-id">gnil-fm.desktop</launchable>
   <provides><binary>gnil-fm</binary></provides>

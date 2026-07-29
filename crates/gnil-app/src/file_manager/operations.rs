@@ -120,30 +120,106 @@ impl FileManager {
             self.tab.sort.field = field;
             self.tab.sort.direction = SortDirection::Ascending;
         }
-        if self.snapshot.phase == DirectoryLoadPhase::Complete {
-            let cursor_path = self
-                .selection
-                .cursor
-                .and_then(|index| self.snapshot.entries.get(index))
-                .map(|entry| entry.path.clone());
+        self.settings.file_sort = self.tab.sort;
+        self.apply_sort_to_snapshot(cx);
+        self.save_settings(cx);
+    }
+
+    fn set_sort_field(&mut self, field: SortField, cx: &mut Context<Self>) {
+        self.tab.sort.field = field;
+        self.settings.file_sort = self.tab.sort;
+        self.apply_sort_to_snapshot(cx);
+        self.save_settings(cx);
+    }
+
+    fn set_sort_direction(&mut self, direction: SortDirection, cx: &mut Context<Self>) {
+        self.tab.sort.direction = direction;
+        self.settings.file_sort = self.tab.sort;
+        self.apply_sort_to_snapshot(cx);
+        self.save_settings(cx);
+    }
+
+    fn set_file_layout(&mut self, layout: FileLayout, cx: &mut Context<Self>) {
+        if self.settings.file_layout == layout {
+            return;
+        }
+        self.settings.file_layout = layout;
+        self.file_list_scroll = UniformListScrollHandle::new();
+        self.rendered_file_range = 0..0;
+        if layout == FileLayout::Details {
+            self.reset_grid_previews();
+        }
+        self.save_settings(cx);
+        cx.notify();
+    }
+
+    fn apply_sort_to_snapshot(&mut self, cx: &mut Context<Self>) {
+        if self.snapshot.phase != DirectoryLoadPhase::Complete {
+            self.load_directory(cx);
+            return;
+        }
+        let cursor_path = self
+            .selection
+            .cursor
+            .and_then(|index| self.snapshot.entries.get(index))
+            .map(|entry| entry.path.clone());
+        let anchor_path = self
+            .selection
+            .anchor
+            .and_then(|index| self.snapshot.entries.get(index))
+            .map(|entry| entry.path.clone());
+
+        if self.tab.root == TabRoot::Trash {
+            self.sort_trash_entries();
+            Arc::make_mut(&mut self.snapshot).entries = self
+                .trash_entries
+                .iter()
+                .map(trash_entry_as_file_entry)
+                .collect();
+        } else {
             self.tab
                 .sort
                 .sort(&mut Arc::make_mut(&mut self.snapshot).entries);
-            if let Some(index) = cursor_path.and_then(|path| {
-                self.snapshot
-                    .entries
-                    .iter()
-                    .position(|entry| entry.path == path)
-            }) {
-                self.selection.cursor = Some(index);
-                if self.selection.anchor.is_some() {
-                    self.selection.anchor = Some(index);
+        }
+
+        self.selection.cursor = cursor_path.and_then(|path| {
+            self.snapshot
+                .entries
+                .iter()
+                .position(|entry| entry.path == path)
+        });
+        self.selection.anchor = anchor_path.and_then(|path| {
+            self.snapshot
+                .entries
+                .iter()
+                .position(|entry| entry.path == path)
+        });
+        cx.notify();
+    }
+
+    fn sort_trash_entries(&mut self) {
+        let sort = self.tab.sort;
+        Arc::make_mut(&mut self.trash_entries).sort_by(|left, right| {
+            if sort.directories_first {
+                let directory_order = (right.kind == FileKind::Directory)
+                    .cmp(&(left.kind == FileKind::Directory));
+                if !directory_order.is_eq() {
+                    return directory_order;
                 }
             }
-            cx.notify();
-        } else {
-            self.load_directory(cx);
-        }
+            let mut order = match sort.field {
+                SortField::Name => natural_cmp(&left.name, &right.name),
+                SortField::Size => left.len.cmp(&right.len),
+                SortField::Modified => left.deletion_unix.cmp(&right.deletion_unix),
+                SortField::Kind => trash_kind_rank(left.kind)
+                    .cmp(&trash_kind_rank(right.kind))
+                    .then_with(|| natural_cmp(&left.name, &right.name)),
+            };
+            if sort.direction == SortDirection::Descending {
+                order = order.reverse();
+            }
+            order
+        });
     }
 
     fn open_terminal_here(&mut self, cx: &mut Context<Self>) {
@@ -278,28 +354,69 @@ impl FileManager {
         cx.notify();
     }
 
-    fn open_rename(&mut self, _: &OpenRename, _: &mut Window, cx: &mut Context<Self>) {
-        if self.tab.root == TabRoot::Trash {
+    fn open_rename(&mut self, _: &OpenRename, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab.root == TabRoot::Trash || self.operation_running {
             return;
         }
         let paths = self.selection.effective_paths(&self.snapshot.entries);
         if paths.is_empty() {
             return;
         }
-        self.operation_sheet_closing = false;
-        self.operation_sheet = if let [path] = paths.as_slice() {
-            let value = path
+        self.inline_rename = None;
+        self.action_menu = None;
+        self.command_bar_menu = None;
+        self.error = None;
+
+        if let [path] = paths.as_slice() {
+            let Some(value) = path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_owned();
-            let name = cx.new(|cx| TextInput::new("New name", value, cx));
-            Some(OperationSheet::Rename {
-                from: path.clone(),
-                name,
-            })
+                .map(str::to_owned)
+            else {
+                self.error = Some("This file name is not valid UTF-8".into());
+                cx.notify();
+                return;
+            };
+            let input_value = value.clone();
+            let input = cx.new(move |cx| {
+                TextInput::new("File name", input_value, cx)
+                    .with_key_context("InlineRenameInput")
+            });
+            let input_subscription =
+                cx.subscribe(&input, |this, input, event: &TextInputEvent, cx| {
+                    if matches!(event, TextInputEvent::Changed) {
+                        input.update(cx, |input, cx| input.set_invalid(false, cx));
+                        this.error = None;
+                        cx.notify();
+                    }
+                });
+            let input_focus = input.focus_handle(cx);
+            let blur_subscription = cx.on_blur(&input_focus, window, |this, window, cx| {
+                this.finish_inline_rename(window, cx);
+            });
+            self.inline_rename = Some(InlineRenameState {
+                path: path.clone(),
+                input: input.clone(),
+                _input_subscription: input_subscription,
+                _blur_subscription: blur_subscription,
+            });
+
+            let selection_end = self
+                .snapshot
+                .entries
+                .iter()
+                .find(|entry| entry.path == *path)
+                .filter(|entry| !entry.is_directory_like())
+                .and_then(|_| Path::new(&value).file_stem())
+                .and_then(|stem| stem.to_str())
+                .map_or(value.len(), str::len);
+            input.update(cx, |input, cx| {
+                input.select_range(0..selection_end, cx);
+                window.focus(&input.focus_handle(cx));
+            });
         } else {
-            Some(OperationSheet::BulkRename {
+            self.operation_sheet_closing = false;
+            self.operation_sheet = Some(OperationSheet::BulkRename {
                 paths,
                 find: cx.new(|cx| TextInput::new("Find", "", cx)),
                 replace: cx.new(|cx| TextInput::new("Replace", "", cx)),
@@ -310,10 +427,84 @@ impl FileManager {
                 regex: false,
                 numbering: false,
                 scope: RenameScope::Stem,
-            })
-        };
-        self.action_menu = None;
+            });
+        }
         cx.notify();
+    }
+
+    fn confirm_inline_rename(
+        &mut self,
+        _: &ConfirmInlineRename,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.finish_inline_rename(window, cx);
+    }
+
+    fn cancel_inline_rename(
+        &mut self,
+        _: &CancelInlineRename,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.inline_rename.take().is_some() {
+            self.error = None;
+            window.focus(&self.focus_handle(cx));
+            cx.notify();
+        }
+    }
+
+    fn finish_inline_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.operation_running {
+            return;
+        }
+        let Some(rename) = self.inline_rename.take() else {
+            return;
+        };
+        let name = rename.input.read(cx).text().trim().to_owned();
+        let operation = (|| {
+            validate_file_name(&name)?;
+            let destination = rename
+                .path
+                .parent()
+                .ok_or_else(|| "Cannot rename a filesystem root".to_owned())?
+                .join(&name);
+            if destination == rename.path {
+                return Ok(None);
+            }
+            match std::fs::symlink_metadata(&destination) {
+                Ok(_) => {
+                    return Err(format!("“{name}” already exists in this folder"));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => {}
+            }
+            Ok(Some(FsOperation::Rename {
+                from: rename.path.clone(),
+                to: destination,
+            }))
+        })();
+
+        match operation {
+            Ok(Some(operation)) => {
+                window.focus(&self.focus_handle(cx));
+                self.start_operation(operation, "Renaming…".into(), false, cx);
+            }
+            Ok(None) => {
+                self.error = None;
+                window.focus(&self.focus_handle(cx));
+                cx.notify();
+            }
+            Err(error) => {
+                rename
+                    .input
+                    .update(cx, |input, cx| input.set_invalid(true, cx));
+                window.focus(&rename.input.focus_handle(cx));
+                self.inline_rename = Some(rename);
+                self.error = Some(error);
+                cx.notify();
+            }
+        }
     }
 
     fn dismiss_sheet(&mut self, _: &DismissSheet, _: &mut Window, cx: &mut Context<Self>) {
@@ -560,6 +751,26 @@ impl FileManager {
 
     fn copy_paths_as_text(&mut self, relative: bool, cx: &mut Context<Self>) {
         if self.tab.root == TabRoot::Trash {
+            let selected: HashSet<_> = self
+                .selection
+                .effective_paths(&self.snapshot.entries)
+                .into_iter()
+                .collect();
+            let paths = self
+                .trash_entries
+                .iter()
+                .filter(|entry| selected.contains(&entry.reference.info_path))
+                .map(|entry| entry.original_path.display().to_string())
+                .collect::<Vec<_>>();
+            if !paths.is_empty() {
+                cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
+                self.status_message = Some(format!(
+                    "Copied {} original path{}",
+                    paths.len(),
+                    if paths.len() == 1 { "" } else { "s" }
+                ));
+                cx.notify();
+            }
             return;
         }
         let paths = self.selection.effective_paths(&self.snapshot.entries);

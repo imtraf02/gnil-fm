@@ -1,13 +1,18 @@
 impl FileManager {
     #[allow(clippy::too_many_lines)]
     fn load_directory(&mut self, cx: &mut Context<Self>) {
+        let navigation_started = self.perf_trace.start();
         if let Some(cancelled) = self.scan_cancel.take() {
             cancelled.store(true, Ordering::Relaxed);
         }
         self.cancel_preview_request();
-        self.refresh_favorite_availability();
+        self.reset_grid_previews();
         self.action_menu = None;
         self.empty_space_menu = None;
+        self.command_bar_menu = None;
+        if self.snapshot.path != self.tab.path {
+            self.inline_rename = None;
+        }
         if self.file_search.open
             && self.file_search.scope == FileSearchScope::CurrentFolder
             && self.file_search.root != self.tab.path
@@ -38,14 +43,16 @@ impl FileManager {
             self.directory_watcher = None;
             self.watched_path = None;
             self.watcher_refresh_at = None;
+            self.pending_watch_changes = PendingWatchChanges::default();
+            self.watcher_apply_running = false;
             self.load_trash(cx);
             return;
         }
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         let path = self.tab.path.clone();
-        self.ensure_directory_watcher(&path, cx);
         let preserve_selection = self.snapshot.path == path;
+        let path_id = stable_path_id(&path);
         let show_hidden = self.tab.show_hidden;
         let sort = self.tab.sort;
         let respect_gitignore = self.settings.hide_gitignored;
@@ -56,12 +63,25 @@ impl FileManager {
         self.error = None;
         if !preserve_selection {
             self.selection.clear();
+            self.snapshot = Arc::new(DirectorySnapshot {
+                generation,
+                path: path.clone(),
+                entries: Vec::new(),
+                unreadable_entries: 0,
+                phase: DirectoryLoadPhase::Discovered,
+            });
+            self.file_list_scroll = UniformListScrollHandle::new();
+            self.rendered_file_range = 0..0;
         }
         self.preview = None;
         self.preview_path = None;
-        cx.notify();
+        self.invalidate_surfaces(SurfaceMask::NAVIGATION, cx);
+        self.ensure_directory_watcher(&path, cx);
+        self.perf_trace
+            .record_folder_navigation(generation, path_id, navigation_started);
 
         let (sender, receiver) = async_channel::bounded(3);
+        let scan_started = self.perf_trace.start();
         let task = cx.background_executor().spawn(async move {
             let result = scan_directory_progressive(
                 &path,
@@ -75,13 +95,15 @@ impl FileManager {
                 },
                 &cancelled,
                 |snapshot| {
-                    let _ = sender.send_blocking(Ok(snapshot));
+                    let elapsed = scan_started.map(|started| started.elapsed());
+                    let _ = sender.send_blocking((Ok(snapshot), elapsed));
                 },
             );
-            let _ = sender.send_blocking(result);
+            let elapsed = scan_started.map(|started| started.elapsed());
+            let _ = sender.send_blocking((result, elapsed));
         });
         cx.spawn(async move |this, cx| {
-            while let Ok(result) = receiver.recv().await {
+            while let Ok((result, scan_elapsed)) = receiver.recv().await {
                 let _ = this.update(cx, |this, cx| {
                     if this.generation != generation {
                         return;
@@ -89,6 +111,8 @@ impl FileManager {
                     match result {
                         Ok(snapshot) => {
                             let complete = snapshot.phase == DirectoryLoadPhase::Complete;
+                            let phase = snapshot.phase;
+                            let entry_count = snapshot.entries.len();
                             let cursor_path = this
                                 .selection
                                 .cursor
@@ -127,6 +151,13 @@ impl FileManager {
                                     }
                                 }
                             }
+                            this.perf_trace.record_folder_phase(
+                                generation,
+                                path_id,
+                                phase,
+                                scan_elapsed,
+                                entry_count,
+                            );
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                         Err(error) => {
@@ -135,79 +166,15 @@ impl FileManager {
                             this.error = Some(error.to_string());
                         }
                     }
-                    cx.notify();
+                    this.invalidate_surfaces(
+                        SurfaceMask::FILE_LIST
+                            | SurfaceMask::STATUS
+                            | SurfaceMask::COMMAND_BAR,
+                        cx,
+                    );
                 });
             }
             let () = task.await;
-        })
-        .detach();
-    }
-
-    fn ensure_directory_watcher(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if self.watched_path.as_deref() == Some(path) {
-            return;
-        }
-        let result = if let (Some(watcher), Some(old)) = (
-            self.directory_watcher.as_mut(),
-            self.watched_path.as_deref(),
-        ) {
-            watcher.change_path(old, path)
-        } else {
-            DirectoryWatcher::watch(path).map(|watcher| {
-                self.directory_watcher = Some(watcher);
-            })
-        };
-        match result {
-            Ok(()) => {
-                self.watched_path = Some(path.to_path_buf());
-                self.watcher_refresh_at = None;
-                if !self.watcher_polling {
-                    self.watcher_polling = true;
-                    Self::schedule_directory_watcher(cx);
-                }
-            }
-            Err(error) => {
-                self.directory_watcher = None;
-                self.watched_path = None;
-                self.watcher_refresh_at = None;
-                self.status_message =
-                    Some(format!("Automatic folder refresh unavailable: {error}"));
-            }
-        }
-    }
-
-    fn schedule_directory_watcher(cx: &mut Context<Self>) {
-        let timer = cx.background_executor().timer(Duration::from_millis(100));
-        cx.spawn(async move |this, cx| {
-            timer.await;
-            let _ = this.update(cx, |this, cx| {
-                let mut changed = false;
-                if let Some(watcher) = &this.directory_watcher {
-                    while let Some(event) = watcher.try_recv() {
-                        match event {
-                            WatchEvent::Changed(_) => changed = true,
-                            WatchEvent::Error(error) => {
-                                this.status_message =
-                                    Some(format!("Folder watcher error: {error}"));
-                            }
-                        }
-                    }
-                }
-                let now = Instant::now();
-                if changed {
-                    this.watcher_refresh_at = Some(now + Duration::from_millis(150));
-                }
-                let refresh_ready = this
-                    .watcher_refresh_at
-                    .is_some_and(|refresh_at| now >= refresh_at);
-                if refresh_ready && this.tab.root != TabRoot::Trash {
-                    this.watcher_refresh_at = None;
-                    this.load_directory(cx);
-                }
-                if this.watcher_polling {
-                    Self::schedule_directory_watcher(cx);
-                }
-            });
         })
         .detach();
     }
@@ -240,11 +207,17 @@ impl FileManager {
                             .collect();
                         snapshot.unreadable_entries = trash.unreadable_entries;
                         snapshot.phase = DirectoryLoadPhase::Complete;
-                        this.trash_entries = trash.entries;
+                        this.trash_entries = Arc::new(trash.entries);
+                        this.sort_trash_entries();
+                        Arc::make_mut(&mut this.snapshot).entries = this
+                            .trash_entries
+                            .iter()
+                            .map(trash_entry_as_file_entry)
+                            .collect();
                     }
                     Err(error) => {
                         Arc::make_mut(&mut this.snapshot).entries.clear();
-                        this.trash_entries.clear();
+                        Arc::make_mut(&mut this.trash_entries).clear();
                         this.error = Some(format!("Could not read Trash: {error}"));
                     }
                 }
@@ -401,10 +374,24 @@ impl FileManager {
         .detach();
     }
 
-    fn select_from_click(&mut self, index: usize, event: &ClickEvent, cx: &mut Context<Self>) {
+    fn select_from_click(
+        &mut self,
+        index: usize,
+        event: &ClickEvent,
+        load_preview: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.pointer_interaction = PointerInteraction::Idle;
         if self.select_from_modifiers(index, event.modifiers()) {
-            self.selection_changed(cx);
+            if load_preview {
+                self.selection_changed(cx);
+            } else {
+                // A directory double-click immediately navigates away. Updating the right-side
+                // preview first would start a redundant directory count that is cancelled a few
+                // microseconds later.
+                self.update_selected_path();
+                self.invalidate_surfaces(SurfaceMask::FILE_LIST | SurfaceMask::STATUS, cx);
+            }
         }
     }
 
@@ -467,10 +454,11 @@ impl FileManager {
                 self.selection
                     .select_only(press.index, &self.snapshot.entries);
             }
-            let native_drag_started = window.start_external_file_drag(
-                ExternalPaths::new(press.payload.paths.iter().cloned()),
-                ExternalFileDragMode::CopyOrMove,
-            );
+            let native_drag_started = window
+                .start_external_file_drag(ExternalPaths::new(
+                    press.payload.paths.iter().cloned(),
+                ))
+                .is_ok();
             self.pointer_interaction = PointerInteraction::FileDrag(ActiveFileDrag { press, copy });
             if !native_drag_started {
                 self.status_message =
@@ -521,6 +509,20 @@ impl FileManager {
 
     fn finish_rubber_band(&mut self, state: RubberBandState, cx: &mut Context<Self>) {
         let changed = if state.crossed_threshold {
+            if let Some(indices) = state.hit_indices {
+                let cursor = if state.current_content_y >= state.origin_content_y {
+                    indices.last().copied()
+                } else {
+                    indices.first().copied()
+                };
+                self.selection.apply_indices(
+                    &state.baseline,
+                    indices,
+                    state.merge,
+                    cursor,
+                    &self.snapshot.entries,
+                )
+            } else {
             let cursor = endpoint_index(
                 state.hit_span.as_ref(),
                 state.origin_content_y,
@@ -543,6 +545,7 @@ impl FileManager {
                     &self.snapshot.entries,
                 )
             }
+            }
         } else if state.merge == gnil_core::SelectionMerge::Replace {
             self.selection.clear()
         } else {
@@ -563,6 +566,9 @@ impl FileManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.finish_column_resize(cx) {
+            return;
+        }
         self.flush_rubber_band_update(cx);
         let interaction = std::mem::take(&mut self.pointer_interaction);
         match interaction {
@@ -594,6 +600,11 @@ impl FileManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(resize) = self.column_resize.take() {
+            self.set_detail_column_width(resize.column, resize.initial_width);
+            cx.notify();
+            return;
+        }
         let interaction = std::mem::take(&mut self.pointer_interaction);
         let changed = match interaction {
             PointerInteraction::RowArmed(press) => {
@@ -762,9 +773,26 @@ impl FileManager {
         }
         self.preview_request_path = None;
         self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.preview_debounce_generation = self.preview_debounce_generation.wrapping_add(1);
+    }
+
+    fn schedule_preview(&mut self, cx: &mut Context<Self>) {
+        self.cancel_preview_request();
+        let generation = self.preview_debounce_generation;
+        let timer = cx.background_executor().timer(Duration::from_millis(50));
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.preview_debounce_generation == generation {
+                    this.load_preview(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn load_preview(&mut self, cx: &mut Context<Self>) {
+        self.preview_debounce_generation = self.preview_debounce_generation.wrapping_add(1);
         if !self.preview_visible {
             return;
         }
@@ -791,6 +819,7 @@ impl FileManager {
             self.cancel_preview_request();
             self.preview = None;
             self.preview_path = None;
+            self.invalidate_surfaces(SurfaceMask::PREVIEW, cx);
             return;
         };
 
@@ -805,6 +834,7 @@ impl FileManager {
         self.cancel_preview_request();
         let generation = self.preview_generation;
         self.preview_request_path = Some(path.clone());
+        self.invalidate_surfaces(SurfaceMask::PREVIEW, cx);
         let service = Arc::clone(&self.preview_service);
         let cache = Arc::clone(&self.preview_cache);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -842,14 +872,17 @@ impl FileManager {
                         this.preview = Some(preview);
                         this.preview_request_path = None;
                         this.preview_cancel = None;
-                        cx.notify();
+                        this.invalidate_surfaces(SurfaceMask::PREVIEW, cx);
                     }
                     Err(PreviewError::Cancelled) => {}
                     Err(error) => {
                         this.preview_request_path = None;
                         this.preview_cancel = None;
                         this.error = Some(error.to_string());
-                        cx.notify();
+                        this.invalidate_surfaces(
+                            SurfaceMask::FILE_LIST | SurfaceMask::PREVIEW | SurfaceMask::STATUS,
+                            cx,
+                        );
                     }
                     _ => {}
                 }

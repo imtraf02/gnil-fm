@@ -168,6 +168,9 @@ impl EmptySpaceMenuState {
     }
 
     pub(crate) fn open_submenu(&mut self, submenu: EmptySpaceSubmenu) {
+        if self.submenu == Some(submenu) {
+            return;
+        }
         self.submenu = Some(submenu);
         self.submenu_entries = submenu_entries(submenu, self.context);
         self.focused_submenu = self.submenu_entries.iter().position(is_selectable);
@@ -433,6 +436,18 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn opening_the_same_submenu_preserves_its_focus() {
+        let mut menu = menu(context());
+        menu.open_submenu(EmptySpaceSubmenu::SortBy);
+        menu.focus_last();
+        let focused_before = menu.focused_submenu;
+
+        menu.open_submenu(EmptySpaceSubmenu::SortBy);
+
+        assert_eq!(menu.focused_submenu, focused_before);
     }
 
     #[test]

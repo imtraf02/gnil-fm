@@ -5,9 +5,17 @@ impl FileManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.inline_rename.is_some() {
+            self.cancel_inline_rename(&CancelInlineRename, window, cx);
+            return;
+        }
+        if self.open_with_chooser.is_some() {
+            self.dismiss_open_with(&DismissOpenWith, window, cx);
+            return;
+        }
         if matches!(
             self.operation_sheet.as_ref(),
-            Some(OperationSheet::Rename { .. } | OperationSheet::BulkRename { .. })
+            Some(OperationSheet::BulkRename { .. })
         ) {
             self.dismiss_sheet(&DismissSheet, window, cx);
             window.focus(&self.focus_handle(cx));
@@ -15,10 +23,6 @@ impl FileManager {
         }
         if self.file_search.open {
             self.dismiss_file_search(&DismissFileSearch, window, cx);
-            return;
-        }
-        if self.settings_open {
-            self.dismiss_settings(&DismissSettings, window, cx);
             return;
         }
         if self.operation_sheet.is_some() {
@@ -29,6 +33,7 @@ impl FileManager {
         if self.appearance_menu_open
             || self.action_menu.is_some()
             || self.empty_space_menu.is_some()
+            || self.command_bar_menu.is_some()
         {
             self.dismiss_menu(&DismissMenu, window, cx);
             return;
@@ -40,23 +45,41 @@ impl FileManager {
     }
 
     fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selection.move_cursor(1, &self.snapshot.entries, false) {
-            self.selection_changed(cx);
+        let delta = if self.settings.file_layout == FileLayout::Grid {
+            isize::try_from(self.grid_columns).unwrap_or(1)
+        } else {
+            1
+        };
+        if self
+            .selection
+            .move_cursor(delta, &self.snapshot.entries, false)
+        {
+            self.scroll_keyboard_cursor();
+            self.selection_changed_debounced(cx);
         }
     }
 
     fn select_previous(&mut self, _: &SelectPrevious, _: &mut Window, cx: &mut Context<Self>) {
-        if self
-            .selection
-            .move_cursor(-1, &self.snapshot.entries, false)
-        {
-            self.selection_changed(cx);
+        let delta = if self.settings.file_layout == FileLayout::Grid {
+            -isize::try_from(self.grid_columns).unwrap_or(1)
+        } else {
+            -1
+        };
+        if self.selection.move_cursor(delta, &self.snapshot.entries, false) {
+            self.scroll_keyboard_cursor();
+            self.selection_changed_debounced(cx);
         }
     }
 
     fn select_next_range(&mut self, _: &SelectNextRange, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selection.move_cursor(1, &self.snapshot.entries, true) {
-            self.selection_changed(cx);
+        let delta = if self.settings.file_layout == FileLayout::Grid {
+            isize::try_from(self.grid_columns).unwrap_or(1)
+        } else {
+            1
+        };
+        if self.selection.move_cursor(delta, &self.snapshot.entries, true) {
+            self.scroll_keyboard_cursor();
+            self.selection_changed_debounced(cx);
         }
     }
 
@@ -66,35 +89,92 @@ impl FileManager {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.selection.move_cursor(-1, &self.snapshot.entries, true) {
-            self.selection_changed(cx);
+        let delta = if self.settings.file_layout == FileLayout::Grid {
+            -isize::try_from(self.grid_columns).unwrap_or(1)
+        } else {
+            -1
+        };
+        if self.selection.move_cursor(delta, &self.snapshot.entries, true) {
+            self.scroll_keyboard_cursor();
+            self.selection_changed_debounced(cx);
         }
+    }
+
+    fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_grid_cursor(-1, false, cx);
+    }
+
+    fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_grid_cursor(1, false, cx);
+    }
+
+    fn select_left_range(&mut self, _: &SelectLeftRange, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_grid_cursor(-1, true, cx);
+    }
+
+    fn select_right_range(&mut self, _: &SelectRightRange, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_grid_cursor(1, true, cx);
+    }
+
+    fn move_grid_cursor(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
+        if self.settings.file_layout != FileLayout::Grid {
+            return;
+        }
+        if self
+            .selection
+            .move_cursor(delta, &self.snapshot.entries, extend)
+        {
+            self.scroll_keyboard_cursor();
+            self.selection_changed_debounced(cx);
+        }
+    }
+
+    fn scroll_keyboard_cursor(&self) {
+        let Some(index) = self.selection.cursor else {
+            return;
+        };
+        if self.rendered_file_range.contains(&index) {
+            return;
+        }
+        let list_index = if self.settings.file_layout == FileLayout::Grid {
+            index / self.grid_columns.max(1)
+        } else {
+            index
+        };
+        self.file_list_scroll
+            .scroll_to_item_strict(list_index, ScrollStrategy::Center);
     }
 
     fn toggle_selection(&mut self, _: &ToggleSelection, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.selection.cursor {
-            let mut changed = self.selection.toggle(index, &self.snapshot.entries);
-            if self.keymap == KeymapProfile::Yazi {
-                changed |= self
-                    .selection
-                    .move_cursor_preserving_selection(1, &self.snapshot.entries);
-            }
-            if changed {
+            if self.selection.toggle(index, &self.snapshot.entries) {
                 self.selection_changed(cx);
             }
         }
     }
 
     fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        self.update_selected_path();
+        if self.preview_visible {
+            self.load_preview(cx);
+        }
+        self.invalidate_surfaces(SurfaceMask::FILE_LIST | SurfaceMask::STATUS, cx);
+    }
+
+    fn selection_changed_debounced(&mut self, cx: &mut Context<Self>) {
+        self.update_selected_path();
+        if self.preview_visible {
+            self.schedule_preview(cx);
+        }
+        self.invalidate_surfaces(SurfaceMask::FILE_LIST | SurfaceMask::STATUS, cx);
+    }
+
+    fn update_selected_path(&mut self) {
         self.tab.selected_path = self
             .selection
             .cursor
             .and_then(|index| self.snapshot.entries.get(index))
             .map(|entry| entry.path.clone());
-        if self.preview_visible {
-            self.load_preview(cx);
-        }
-        cx.notify();
     }
 
     fn selected_paths_cached(&mut self) -> Arc<[PathBuf]> {
@@ -164,10 +244,12 @@ impl FileManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.operation_sheet.is_some()
+        if self.open_with_chooser.is_some()
+            || self.operation_sheet.is_some()
             || self.action_menu.is_some()
             || self.empty_space_menu.is_some()
             || self.appearance_menu_open
+            || self.command_bar_menu.is_some()
         {
             return;
         }
@@ -426,6 +508,7 @@ impl FileManager {
         if self.action_menu.is_some() {
             self.dismiss_action_menu(cx);
         } else {
+            self.command_bar_menu = None;
             self.appearance_menu_open = false;
             self.open_action_menu(ActionMenuPlacement::Header, cx);
         }
@@ -437,6 +520,7 @@ impl FileManager {
         } else {
             self.action_menu = None;
             self.empty_space_menu = None;
+            self.command_bar_menu = None;
             self.appearance_menu_open = true;
             self.appearance_menu_closing = false;
             cx.notify();
@@ -444,70 +528,68 @@ impl FileManager {
     }
 
     fn toggle_settings(&mut self, _: &ToggleSettings, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_open {
-            self.dismiss_settings(&DismissSettings, window, cx);
-        } else {
-            self.settings_open = true;
-            self.settings_closing = false;
-            self.action_menu = None;
-            self.empty_space_menu = None;
-            self.appearance_menu_open = false;
-            cx.notify();
-        }
+        let _ = window;
+        self.action_menu = None;
+        self.empty_space_menu = None;
+        self.command_bar_menu = None;
+        self.appearance_menu_open = false;
+        open_preferences_window(SettingsCategory::Appearance, cx);
     }
 
-    fn dismiss_settings(&mut self, _: &DismissSettings, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.settings_open || self.settings_closing {
-            return;
-        }
-        if self.reduced_motion {
-            self.settings_open = false;
-            cx.notify();
-            return;
-        }
-        self.settings_closing = true;
-        cx.notify();
-        let timer = cx.background_executor().timer(Duration::from_millis(80));
-        cx.spawn(async move |this, cx| {
-            timer.await;
-            let _ = this.update(cx, |this, cx| {
-                if this.settings_closing {
-                    this.settings_open = false;
-                    this.settings_closing = false;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+    fn open_keymap(&mut self, _: &OpenKeymap, _: &mut Window, cx: &mut Context<Self>) {
+        self.action_menu = None;
+        self.empty_space_menu = None;
+        self.command_bar_menu = None;
+        self.appearance_menu_open = false;
+        open_preferences_window(SettingsCategory::Keymap, cx);
     }
 
-    fn save_and_apply_settings(&mut self, cx: &mut Context<Self>) {
+    fn sync_preferences(
+        &mut self,
+        settings: &AppSettings,
+        keymap: &KeymapOverrides,
+        cx: &mut Context<Self>,
+    ) {
+        let show_hidden_changed = self.settings.show_hidden != settings.show_hidden;
+        let sort_changed = self.settings.file_sort != settings.file_sort;
+        let layout_changed = self.settings.file_layout != settings.file_layout;
         let preview_was_visible = self.preview_visible;
-        self.settings.normalize();
-        let _ = self.config_paths.save_settings(&self.settings);
-        self.keymap = self.settings.keymap;
+        self.settings = settings.clone();
+        self.refresh_favorite_paths();
+        self.refresh_favorite_availability(cx);
         self.tab.show_hidden = self.settings.show_hidden;
+        self.tab.sort = self.settings.file_sort;
         self.preview_visible = self.settings.preview_enabled;
-        if self.preview_visible {
-            self.load_preview(cx);
-        } else if preview_was_visible {
-            self.cancel_preview_request();
-        }
         self.auto_mount_removable = self.settings.auto_mount_removable;
         self.reduced_motion = self.settings.reduced_motion;
         self.preview_cache
             .lock()
             .expect("preview cache lock poisoned")
             .set_capacity_mib(self.settings.memory_cache_mib);
+        if layout_changed {
+            self.file_list_scroll = UniformListScrollHandle::new();
+            self.rendered_file_range = 0..0;
+            if self.settings.file_layout == FileLayout::Details {
+                self.reset_grid_previews();
+            }
+        }
 
         let theme_appearance = resolve_theme_appearance(self.settings.theme, self.theme_appearance);
         let requested_theme = selected_theme_name(&self.settings, theme_appearance);
-        let (active_theme, _) = self
-            .theme_catalog
-            .resolve(requested_theme, theme_appearance);
+        let (active_theme, _) = self.theme_catalog.resolve(requested_theme, theme_appearance);
         self.active_theme_name = active_theme.name.clone();
         theme_runtime::set_active(active_theme.colors);
+        PreferencesWindow::install_keybindings(keymap, cx);
 
+        if show_hidden_changed {
+            self.load_directory(cx);
+        } else if sort_changed {
+            self.apply_sort_to_snapshot(cx);
+        } else if self.preview_visible && !preview_was_visible {
+            self.load_preview(cx);
+        } else if !self.preview_visible && preview_was_visible {
+            self.cancel_preview_request();
+        }
         cx.notify();
     }
 
@@ -534,7 +616,7 @@ impl FileManager {
     fn set_theme_mode(&mut self, mode: ThemeMode, window: &Window, cx: &mut Context<Self>) {
         self.settings.theme = mode;
         self.apply_selected_theme(window_theme_appearance(window), cx);
-        self.save_settings();
+        self.save_settings(cx);
     }
 
     fn select_theme(&mut self, name: &str, cx: &mut Context<Self>) {
@@ -543,7 +625,7 @@ impl FileManager {
             ThemeAppearance::Dark => name.clone_into(&mut self.settings.dark_theme),
         }
         self.apply_theme_name(name, cx);
-        self.save_settings();
+        self.save_settings(cx);
     }
 
     fn reload_themes(&mut self, cx: &mut Context<Self>) {
@@ -585,10 +667,16 @@ impl FileManager {
         cx.notify();
     }
 
-    fn save_settings(&mut self) {
-        if let Err(error) = self.config_paths.save_settings(&self.settings) {
-            self.error = Some(format!("Could not save settings: {error}"));
-        }
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
+        let settings = self.settings.clone();
+        let config_paths = self.config_paths.clone();
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.config_paths = config_paths;
+            if let Err(error) = preferences.save_settings(settings) {
+                eprintln!("Could not save settings: {error}");
+            }
+            cx.notify();
+        });
     }
 
     fn selected_favorite_candidate(&self) -> Option<PathBuf> {
@@ -625,12 +713,12 @@ impl FileManager {
             self.favorite_availability.remove(&path);
             self.status_message = Some("Removed from Favorites".into());
         } else {
-            let available = path.is_dir();
-            self.favorite_availability.insert(path.clone(), available);
+            self.favorite_availability.insert(path.clone(), true);
             self.settings.favorites.push(path);
             self.status_message = Some("Added to Favorites".into());
         }
-        self.save_settings();
+        self.refresh_favorite_paths();
+        self.save_settings(cx);
         cx.notify();
     }
 
@@ -640,9 +728,10 @@ impl FileManager {
             .favorites
             .retain(|favorite| favorite != path);
         if self.settings.favorites.len() != count {
+            self.refresh_favorite_paths();
             self.favorite_availability.remove(path);
             self.status_message = Some("Removed unavailable favorite".into());
-            self.save_settings();
+            self.save_settings(cx);
             cx.notify();
         }
     }
@@ -662,21 +751,54 @@ impl FileManager {
         let favorite = self.settings.favorites.remove(source_index);
         let insertion = target_index.min(self.settings.favorites.len());
         self.settings.favorites.insert(insertion, favorite);
-        self.save_settings();
+        self.refresh_favorite_paths();
+        self.save_settings(cx);
         cx.notify();
     }
 
-    fn refresh_favorite_availability(&mut self) {
-        self.favorite_availability = self
-            .settings
-            .favorites
-            .iter()
-            .map(|favorite| (favorite.clone(), favorite.is_dir()))
-            .collect();
+    fn refresh_favorite_availability(&mut self, cx: &mut Context<Self>) {
+        let favorites = self.settings.favorites.clone();
+        if favorites.is_empty() {
+            self.favorite_availability.clear();
+            return;
+        }
+        let task = cx.background_executor().spawn(async move {
+            favorites
+                .into_iter()
+                .map(|favorite| {
+                    let available = favorite.is_dir();
+                    (favorite, available)
+                })
+                .collect::<HashMap<_, _>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let availability = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let current: HashSet<_> = this.settings.favorites.iter().cloned().collect();
+                this.favorite_availability
+                    .retain(|path, _| current.contains(path));
+                for (path, available) in availability {
+                    if current.contains(&path) {
+                        this.favorite_availability.insert(path, available);
+                    }
+                }
+                this.invalidate_surfaces(SurfaceMask::SIDEBAR, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_favorite_paths(&mut self) {
+        self.favorite_paths = Arc::new(self.settings.favorites.iter().cloned().collect());
     }
 
     fn open_favorite(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if path.is_dir() {
+        if self
+            .favorite_availability
+            .get(&path)
+            .copied()
+            .unwrap_or(true)
+        {
             self.pending_reveal = None;
             self.tab.navigate(path);
             self.load_directory(cx);
@@ -712,6 +834,7 @@ impl FileManager {
             return;
         }
         self.empty_space_menu = None;
+        self.command_bar_menu = None;
         self.appearance_menu_open = false;
         let clipboard_valid = self.file_clipboard_from_system(cx).is_some();
         let context = MenuContext::from_selection(
@@ -761,6 +884,7 @@ impl FileManager {
         cx: &mut Context<Self>,
     ) {
         self.action_menu = None;
+        self.command_bar_menu = None;
         self.appearance_menu_open = false;
         self.selection.clear();
         self.tab.selected_path = None;
@@ -815,6 +939,8 @@ impl FileManager {
     fn dismiss_menu(&mut self, _: &DismissMenu, _: &mut Window, cx: &mut Context<Self>) {
         if self.appearance_menu_open {
             self.dismiss_appearance_menu(cx);
+        } else if self.command_bar_menu.is_some() {
+            self.dismiss_command_bar_menu(cx);
         } else if self
             .empty_space_menu
             .as_mut()
@@ -823,13 +949,31 @@ impl FileManager {
             cx.notify();
         } else if self.empty_space_menu.is_some() {
             self.dismiss_empty_space_menu(cx);
+        } else if self
+            .action_menu
+            .as_mut()
+            .is_some_and(ActionMenuState::close_submenu)
+        {
+            cx.notify();
         } else {
             self.dismiss_action_menu(cx);
         }
     }
 
     fn menu_next(&mut self, _: &MenuNext, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(menu) = self.empty_space_menu.as_mut()
+        if self.command_bar_menu.is_some() {
+            let items = self
+                .command_bar_menu
+                .as_ref()
+                .map(|menu| self.command_bar_menu_items(menu.kind))
+                .unwrap_or_default();
+            if let Some(menu) = self.command_bar_menu.as_mut()
+                && menu.animation != MenuAnimationState::Closing
+            {
+                menu.move_focus(&items, 1);
+                cx.notify();
+            }
+        } else if let Some(menu) = self.empty_space_menu.as_mut()
             && menu.animation != MenuAnimationState::Closing
         {
             menu.move_focus(1);
@@ -843,7 +987,19 @@ impl FileManager {
     }
 
     fn menu_previous(&mut self, _: &MenuPrevious, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(menu) = self.empty_space_menu.as_mut()
+        if self.command_bar_menu.is_some() {
+            let items = self
+                .command_bar_menu
+                .as_ref()
+                .map(|menu| self.command_bar_menu_items(menu.kind))
+                .unwrap_or_default();
+            if let Some(menu) = self.command_bar_menu.as_mut()
+                && menu.animation != MenuAnimationState::Closing
+            {
+                menu.move_focus(&items, -1);
+                cx.notify();
+            }
+        } else if let Some(menu) = self.empty_space_menu.as_mut()
             && menu.animation != MenuAnimationState::Closing
         {
             menu.move_focus(-1);
@@ -857,7 +1013,19 @@ impl FileManager {
     }
 
     fn menu_first(&mut self, _: &MenuFirst, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(menu) = self.empty_space_menu.as_mut()
+        if self.command_bar_menu.is_some() {
+            let items = self
+                .command_bar_menu
+                .as_ref()
+                .map(|menu| self.command_bar_menu_items(menu.kind))
+                .unwrap_or_default();
+            if let Some(menu) = self.command_bar_menu.as_mut()
+                && menu.animation != MenuAnimationState::Closing
+            {
+                menu.focus_first(&items);
+                cx.notify();
+            }
+        } else if let Some(menu) = self.empty_space_menu.as_mut()
             && menu.animation != MenuAnimationState::Closing
         {
             menu.focus_first();
@@ -871,7 +1039,19 @@ impl FileManager {
     }
 
     fn menu_last(&mut self, _: &MenuLast, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(menu) = self.empty_space_menu.as_mut()
+        if self.command_bar_menu.is_some() {
+            let items = self
+                .command_bar_menu
+                .as_ref()
+                .map(|menu| self.command_bar_menu_items(menu.kind))
+                .unwrap_or_default();
+            if let Some(menu) = self.command_bar_menu.as_mut()
+                && menu.animation != MenuAnimationState::Closing
+            {
+                menu.focus_last(&items);
+                cx.notify();
+            }
+        } else if let Some(menu) = self.empty_space_menu.as_mut()
             && menu.animation != MenuAnimationState::Closing
         {
             menu.focus_last();
@@ -885,6 +1065,21 @@ impl FileManager {
     }
 
     fn menu_activate(&mut self, _: &MenuActivate, window: &mut Window, cx: &mut Context<Self>) {
+        let command_bar_command = self
+            .command_bar_menu
+            .as_ref()
+            .filter(|menu| menu.animation != MenuAnimationState::Closing)
+            .and_then(|menu| {
+                let items = self.command_bar_menu_items(menu.kind);
+                menu.focused
+                    .and_then(|index| items.get(index))
+                    .filter(|item| item.enabled)
+                    .map(|item| item.command)
+            });
+        if let Some(command) = command_bar_command {
+            self.dispatch_command_bar_command(command, window, cx);
+            return;
+        }
         let empty_space_activation = self
             .empty_space_menu
             .as_ref()
@@ -904,13 +1099,13 @@ impl FileManager {
             }
             return;
         }
-        let command = self
+        let activation = self
             .action_menu
             .as_ref()
             .filter(|menu| menu.animation != MenuAnimationState::Closing)
-            .and_then(ActionMenuState::focused_command);
-        if let Some(command) = command {
-            self.dispatch_menu_command(command, window, cx);
+            .and_then(ActionMenuState::focused_activation);
+        if let Some(activation) = activation {
+            self.dispatch_action_menu_activation(activation, window, cx);
         }
     }
 
@@ -928,16 +1123,59 @@ impl FileManager {
         {
             menu.open_submenu(submenu);
             cx.notify();
+            return;
+        }
+        if self
+            .action_menu
+            .as_ref()
+            .and_then(ActionMenuState::focused_activation)
+            == Some(ActionMenuActivation::Submenu(FileMenuSubmenu::OpenWith))
+        {
+            self.show_open_with_submenu(cx);
         }
     }
 
     fn menu_close_submenu(&mut self, _: &MenuCloseSubmenu, _: &mut Window, cx: &mut Context<Self>) {
-        if self
+        let closed_empty_submenu = self
             .empty_space_menu
             .as_mut()
-            .is_some_and(EmptySpaceMenuState::close_submenu)
-        {
+            .is_some_and(EmptySpaceMenuState::close_submenu);
+        let closed_action_submenu = !closed_empty_submenu
+            && self
+                .action_menu
+                .as_mut()
+                .is_some_and(ActionMenuState::close_submenu);
+        if closed_empty_submenu || closed_action_submenu {
             cx.notify();
+        }
+    }
+
+    fn dispatch_action_menu_activation(
+        &mut self,
+        activation: ActionMenuActivation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match activation {
+            ActionMenuActivation::Command(command) => {
+                self.dispatch_menu_command(command, window, cx);
+            }
+            ActionMenuActivation::Submenu(FileMenuSubmenu::OpenWith) => {
+                self.show_open_with_submenu(cx);
+            }
+            ActionMenuActivation::OpenWithApplication(application) => {
+                self.launch_with_application(application, false, window, cx);
+            }
+            ActionMenuActivation::ChooseAnotherApplication => {
+                let target = self.action_menu.as_ref().and_then(|menu| {
+                    menu.open_with_submenu
+                        .as_ref()
+                        .map(|submenu| (submenu.path.clone(), submenu.mime_type.clone()))
+                });
+                if let Some((path, mime_type)) = target {
+                    self.open_open_with_chooser(path, mime_type, window, cx);
+                }
+            }
         }
     }
 
@@ -1007,12 +1245,10 @@ impl FileManager {
             EmptySpaceMenuCommand::Paste => self.paste(&Paste, window, cx),
             EmptySpaceMenuCommand::Refresh => self.refresh(&Refresh, window, cx),
             EmptySpaceMenuCommand::SortField(field) => {
-                self.tab.sort.field = field;
-                self.load_directory(cx);
+                self.set_sort_field(field, cx);
             }
             EmptySpaceMenuCommand::SortDirection(direction) => {
-                self.tab.sort.direction = direction;
-                self.load_directory(cx);
+                self.set_sort_direction(direction, cx);
             }
             EmptySpaceMenuCommand::ToggleHidden => {
                 self.toggle_hidden(&ToggleHidden, window, cx);
@@ -1020,6 +1256,114 @@ impl FileManager {
             EmptySpaceMenuCommand::SelectAll => self.select_all_entries(cx),
             EmptySpaceMenuCommand::OpenTerminal => self.open_terminal_here(cx),
             EmptySpaceMenuCommand::FolderProperties => self.open_folder_properties(cx),
+        }
+    }
+
+    fn toggle_command_bar_menu(
+        &mut self,
+        kind: CommandBarMenuKind,
+        cx: &mut Context<Self>,
+    ) {
+        if self.command_bar_menu.as_ref().is_some_and(|menu| {
+            menu.kind == kind && menu.animation != MenuAnimationState::Closing
+        }) {
+            self.dismiss_command_bar_menu(cx);
+            return;
+        }
+        self.action_menu = None;
+        self.empty_space_menu = None;
+        self.appearance_menu_open = false;
+        self.command_bar_menu_serial = self.command_bar_menu_serial.wrapping_add(1);
+        let items = self.command_bar_menu_items(kind);
+        self.command_bar_menu = Some(CommandBarMenuState::new(
+            kind,
+            &items,
+            self.command_bar_menu_serial,
+        ));
+        cx.notify();
+    }
+
+    fn dismiss_command_bar_menu(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = self.command_bar_menu.as_mut() else {
+            return;
+        };
+        if menu.animation == MenuAnimationState::Closing {
+            return;
+        }
+        menu.animation = MenuAnimationState::Closing;
+        let serial = menu.serial;
+        cx.notify();
+        let timer = cx.background_executor().timer(Duration::from_millis(80));
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.command_bar_menu.as_ref().is_some_and(|menu| {
+                    menu.serial == serial && menu.animation == MenuAnimationState::Closing
+                }) {
+                    this.command_bar_menu = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn dispatch_command_bar_command(
+        &mut self,
+        command: CommandBarCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.command_bar_menu = None;
+        match command {
+            CommandBarCommand::Cut => self.cut_selected(&CutSelected, window, cx),
+            CommandBarCommand::Copy => self.copy_selected(&CopySelected, window, cx),
+            CommandBarCommand::Rename => self.open_rename(&OpenRename, window, cx),
+            CommandBarCommand::Trash => self.trash_selected(&TrashSelected, window, cx),
+            CommandBarCommand::NewFolder => self.create_folder(&CreateFolder, window, cx),
+            CommandBarCommand::NewFile => self.create_file(&CreateFile, window, cx),
+            CommandBarCommand::NewSymlink => {
+                self.open_create_symlink(&OpenCreateSymlink, window, cx);
+            }
+            CommandBarCommand::Open => self.open_selected(&OpenSelected, window, cx),
+            CommandBarCommand::OpenWith => {
+                self.open_with_selected(&OpenWithSelected, window, cx);
+            }
+            CommandBarCommand::ToggleFavorite => {
+                self.toggle_selected_favorite(&ToggleFavorite, window, cx);
+            }
+            CommandBarCommand::Extract => self.extract_selected(&ExtractSelected, window, cx),
+            CommandBarCommand::ExtractTo => {
+                self.extract_selected_to(&ExtractSelectedTo, window, cx);
+            }
+            CommandBarCommand::CopyPathAbsolute => {
+                self.copy_path_absolute(&CopyPathAbsolute, window, cx);
+            }
+            CommandBarCommand::CopyPathRelative => {
+                self.copy_path_relative(&CopyPathRelative, window, cx);
+            }
+            CommandBarCommand::Properties => {
+                if self.selection.selected_count() == 0 {
+                    self.open_folder_properties(cx);
+                } else {
+                    self.open_permissions(&OpenPermissions, window, cx);
+                }
+            }
+            CommandBarCommand::DeletePermanently => {
+                self.delete_selected(&DeleteSelected, window, cx);
+            }
+            CommandBarCommand::SortField(field) => self.set_sort_field(field, cx),
+            CommandBarCommand::SortDirection(direction) => {
+                self.set_sort_direction(direction, cx);
+            }
+            CommandBarCommand::Layout(layout) => {
+                // Keep the old list mounted until the pointer event has finished. Replacing the
+                // list under the released pointer can otherwise select the first grid card that
+                // appears beneath the menu item.
+                cx.defer_in(window, move |this, _, cx| {
+                    this.set_file_layout(layout, cx);
+                });
+            }
         }
     }
 }

@@ -17,7 +17,7 @@ pub use devices::{
 };
 pub use git::{GitStatusSnapshot, scan_git_status};
 pub use operation::{OperationError, OperationExecutor, validate_transfer_destination};
-pub use scan::{ScanOptions, scan_directory, scan_directory_progressive};
+pub use scan::{ScanOptions, scan_directory, scan_directory_progressive, scan_entry};
 pub use scheduler::{JobContext, JobHandle, TaskScheduler};
 pub use search::{SearchHit, SearchOptions, fuzzy_match_score, search_paths};
 pub use trash_view::{TrashEntry, TrashSnapshot, scan_trash};

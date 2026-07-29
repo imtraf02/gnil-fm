@@ -137,17 +137,18 @@ impl SortSpec {
                 right_dir.cmp(&left_dir)
             });
 
-            let mut order = directory_order
-                .filter(|order| !order.is_eq())
-                .unwrap_or_else(|| match self.field {
-                    SortField::Name => natural_cmp(&left.name, &right.name),
-                    SortField::Size => metadata_len(left).cmp(&metadata_len(right)),
-                    SortField::Modified => metadata_modified(left).cmp(&metadata_modified(right)),
-                    SortField::Kind => kind_rank(left.kind)
-                        .cmp(&kind_rank(right.kind))
-                        .then_with(|| natural_cmp(&left.name, &right.name)),
-                });
+            if let Some(order) = directory_order.filter(|order| !order.is_eq()) {
+                return order;
+            }
 
+            let mut order = match self.field {
+                SortField::Name => natural_cmp(&left.name, &right.name),
+                SortField::Size => metadata_len(left).cmp(&metadata_len(right)),
+                SortField::Modified => metadata_modified(left).cmp(&metadata_modified(right)),
+                SortField::Kind => kind_rank(left.kind)
+                    .cmp(&kind_rank(right.kind))
+                    .then_with(|| natural_cmp(&left.name, &right.name)),
+            };
             if self.direction == SortDirection::Descending {
                 order = order.reverse();
             }
@@ -248,5 +249,44 @@ mod tests {
         let mut names = ["file10a", "file02", "file2", "File1", "file10b"];
         names.sort_by(|a, b| natural_cmp(a, b));
         assert_eq!(names, ["File1", "file2", "file02", "file10a", "file10b"]);
+    }
+
+    #[test]
+    fn descending_sort_keeps_directories_first() {
+        let mut entries = [
+            FileEntry {
+                path: PathBuf::from("/file-a"),
+                name: "a".into(),
+                kind: FileKind::File,
+                hidden: false,
+                metadata: EntryMetadata::Pending,
+                git_status: None,
+            },
+            FileEntry {
+                path: PathBuf::from("/folder"),
+                name: "folder".into(),
+                kind: FileKind::Directory,
+                hidden: false,
+                metadata: EntryMetadata::Pending,
+                git_status: None,
+            },
+            FileEntry {
+                path: PathBuf::from("/file-z"),
+                name: "z".into(),
+                kind: FileKind::File,
+                hidden: false,
+                metadata: EntryMetadata::Pending,
+                git_status: None,
+            },
+        ];
+        SortSpec {
+            direction: SortDirection::Descending,
+            ..SortSpec::default()
+        }
+        .sort(&mut entries);
+
+        assert_eq!(entries[0].kind, FileKind::Directory);
+        assert_eq!(entries[1].name, "z");
+        assert_eq!(entries[2].name, "a");
     }
 }

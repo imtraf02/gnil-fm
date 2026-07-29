@@ -41,16 +41,24 @@ pub fn scan_directory(path: &Path, options: ScanOptions) -> io::Result<Directory
     scan_directory_progressive(path, options, &AtomicBool::new(false), |_| {})
 }
 
+/// Reads one direct directory entry and its cheap metadata.
+///
+/// This is intended for incremental watcher updates. Like the initial directory scan, it never
+/// enumerates a child directory to calculate its item count.
+pub fn scan_entry(path: PathBuf) -> io::Result<FileEntry> {
+    let file_type = fs::symlink_metadata(&path)?.file_type();
+    let mut entry = pending_entry(path, Some(classify_file_type(file_type)));
+    entry.metadata = EntryMetadata::Ready(read_metadata(&entry)?);
+    Ok(entry)
+}
+
 pub fn scan_directory_progressive(
     path: &Path,
     options: ScanOptions,
     cancelled: &AtomicBool,
     mut discovered: impl FnMut(DirectorySnapshot),
 ) -> io::Result<DirectorySnapshot> {
-    // Fail early with the same root-level permission/not-found behavior as `read_dir`.
-    fs::read_dir(path)?;
     ensure_not_cancelled(cancelled)?;
-
     let (mut entries, discovery_errors) = discover_entries(path, options, cancelled)?;
     sort_discovered(&mut entries, options.sort);
     discovered(DirectorySnapshot {
@@ -98,7 +106,9 @@ pub fn scan_directory_progressive(
         }
     }
 
-    options.sort.sort(&mut entries);
+    if matches!(options.sort.field, SortField::Size | SortField::Modified) {
+        options.sort.sort(&mut entries);
+    }
     Ok(DirectorySnapshot {
         generation: options.generation,
         path: path.to_path_buf(),
@@ -218,16 +228,11 @@ fn read_metadata(entry: &FileEntry) -> io::Result<FileMetadata> {
             classify_file_type(target.file_type())
         })
     });
-    let child_count = (entry.kind == FileKind::Directory)
-        .then(|| {
-            fs::read_dir(&entry.path)
-                .ok()
-                .and_then(|children| u64::try_from(children.count()).ok())
-        })
-        .flatten();
     Ok(FileMetadata {
         len: metadata.len(),
-        child_count,
+        // Match Thunar's fast path: listing a folder never recursively enumerates each child
+        // directory. Item counts are loaded separately when an explicit preview needs them.
+        child_count: None,
         modified_unix_ms,
         mode,
         readonly: metadata.permissions().readonly(),
@@ -293,11 +298,26 @@ mod tests {
             snapshot.entries[0]
                 .metadata()
                 .and_then(|metadata| metadata.child_count),
-            Some(2)
+            None
         );
         assert_eq!(
             snapshot.entries[1].metadata().map(|metadata| metadata.len),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn incremental_directory_entry_does_not_count_children() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("folder");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("child"), b"x").unwrap();
+
+        let entry = scan_entry(folder).unwrap();
+        assert_eq!(entry.kind, FileKind::Directory);
+        assert_eq!(
+            entry.metadata().and_then(|metadata| metadata.child_count),
+            None
         );
     }
 

@@ -80,7 +80,6 @@ impl Picker {
             visible_indices: Arc::from([]),
             directory_watcher: None,
             watched_path: None,
-            watcher_polling: false,
         }
     }
 
@@ -96,7 +95,6 @@ impl Picker {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         let path = self.current_dir.clone();
-        self.ensure_directory_watcher(&path, cx);
         let show_hidden = self.show_hidden;
         let respect_gitignore = self.respect_gitignore;
         let metadata_workers = self.metadata_workers;
@@ -105,6 +103,17 @@ impl Picker {
         self.loading = true;
         self.error = None;
         self.selected.clear();
+        if self.snapshot.path != path {
+            self.snapshot = Arc::new(DirectorySnapshot {
+                generation,
+                path: path.clone(),
+                entries: Vec::new(),
+                unreadable_entries: 0,
+                phase: DirectoryLoadPhase::Discovered,
+            });
+        }
+        cx.notify();
+        self.ensure_directory_watcher(&path, cx);
         let (sender, receiver) = async_channel::bounded(3);
         let task = cx.background_executor().spawn(async move {
             let result = scan_directory_progressive(
@@ -160,54 +169,75 @@ impl Picker {
         if self.watched_path.as_deref() == Some(path) {
             return;
         }
-        let result = if let (Some(watcher), Some(old)) = (
-            self.directory_watcher.as_mut(),
-            self.watched_path.as_deref(),
-        ) {
-            watcher.change_path(old, path)
-        } else {
-            DirectoryWatcher::watch(path).map(|watcher| {
-                self.directory_watcher = Some(watcher);
-            })
-        };
-        match result {
-            Ok(()) => {
-                self.watched_path = Some(path.to_path_buf());
-                if !self.watcher_polling {
-                    self.watcher_polling = true;
-                    Self::schedule_directory_watcher(cx);
+        let generation = self.generation;
+        let path = path.to_path_buf();
+        let previous = self.directory_watcher.take();
+        self.watched_path = None;
+        let task = cx.background_executor().spawn(async move {
+            drop(previous);
+            DirectoryWatcher::watch(&path).map(|watcher| (path, watcher))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
                 }
-            }
-            Err(error) => {
-                self.directory_watcher = None;
-                self.watched_path = None;
-                self.status = Some(format!("Automatic refresh unavailable: {error}"));
-            }
-        }
+                match result {
+                    Ok((path, watcher)) if this.current_dir == path => {
+                        let events = watcher.events();
+                        this.directory_watcher = Some(watcher);
+                        this.watched_path = Some(path);
+                        Self::wait_for_directory_watcher_event(events, generation, cx);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        this.status = Some(format!("Automatic refresh unavailable: {error}"));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
-    fn schedule_directory_watcher(cx: &mut Context<Self>) {
-        let timer = cx.background_executor().timer(Duration::from_millis(100));
+    fn wait_for_directory_watcher_event(
+        events: async_channel::Receiver<WatchEvent>,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let timer = cx.background_executor().timer(Duration::from_millis(25));
         cx.spawn(async move |this, cx| {
+            let Ok(first_event) = events.recv().await else {
+                return;
+            };
             timer.await;
+            let mut batch = vec![first_event];
+            while let Ok(event) = events.try_recv() {
+                batch.push(event);
+            }
+            let next_events = events.clone();
             let _ = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
                 let mut changed = false;
-                if let Some(watcher) = &this.directory_watcher {
-                    while let Some(event) = watcher.try_recv() {
-                        match event {
-                            WatchEvent::Changed(_) => changed = true,
-                            WatchEvent::Error(error) => {
-                                this.status = Some(format!("Folder watcher error: {error}"));
-                            }
+                for event in batch {
+                    match event {
+                        WatchEvent::Upsert(_)
+                        | WatchEvent::Remove(_)
+                        | WatchEvent::Rename { .. }
+                        | WatchEvent::Rescan => changed = true,
+                        WatchEvent::Error(error) => {
+                            this.status = Some(format!("Folder watcher error: {error}"));
+                            cx.notify();
                         }
                     }
                 }
                 if changed && this.location == PickerLocation::Directory {
                     this.load_directory(cx);
                 }
-                if this.watcher_polling {
-                    Self::schedule_directory_watcher(cx);
-                }
+                Self::wait_for_directory_watcher_event(next_events, this.generation, cx);
             });
         })
         .detach();

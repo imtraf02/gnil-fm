@@ -22,6 +22,7 @@ impl FileManager {
             merge: merge_from_modifiers(event.modifiers),
             crossed_threshold: false,
             hit_span: None,
+            hit_indices: (self.settings.file_layout == FileLayout::Grid).then(Vec::new),
             autoscroll_scheduled: false,
         });
         cx.notify();
@@ -36,7 +37,9 @@ impl FileManager {
     }
 
     fn active_row_height(&self) -> f32 {
-        if self.tab.root == TabRoot::Trash {
+        if self.settings.file_layout == FileLayout::Grid {
+            GRID_ROW_HEIGHT
+        } else if self.tab.root == TabRoot::Trash {
             TRASH_ROW_HEIGHT
         } else {
             FILE_ROW_HEIGHT
@@ -55,6 +58,9 @@ impl FileManager {
         let rendered_range = self.rendered_file_range.clone();
         let viewport_left = f32::from(viewport.left());
         let viewport_right = f32::from(viewport.right());
+        let grid_layout = self.settings.file_layout == FileLayout::Grid;
+        let grid_columns = self.grid_columns;
+        let grid_card_width = self.grid_card_width;
         let mut should_schedule = false;
         let mut changed = false;
         let mut overlay_changed = false;
@@ -65,31 +71,55 @@ impl FileManager {
                 state.crossed_threshold || movement_crossed_threshold(state.origin, position);
             let left = f32::from(state.origin.x).min(f32::from(position.x));
             let right = f32::from(state.origin.x).max(f32::from(position.x));
-            let candidate_span = band_span(
-                state.origin_content_y,
-                current_content_y,
-                row_height,
-                item_count,
-                right >= viewport_left && left <= viewport_right,
-            );
-            let hit_span = candidate_span.filter(|span| {
-                !rendered_range.is_empty()
-                    && *span.end() >= rendered_range.start
-                    && *span.start() < rendered_range.end
-            });
+            let (hit_span, hit_indices) = if grid_layout {
+                (
+                    None,
+                    Some(grid_band_indices(
+                        f32::from(state.origin.x - viewport.left()),
+                        f32::from(position.x - viewport.left()),
+                        state.origin_content_y,
+                        current_content_y,
+                        grid_card_width,
+                        GRID_CARD_GAP,
+                        GRID_HORIZONTAL_PADDING,
+                        row_height,
+                        grid_columns,
+                        item_count,
+                    )),
+                )
+            } else {
+                let candidate_span = band_span(
+                    state.origin_content_y,
+                    current_content_y,
+                    row_height,
+                    item_count,
+                    right >= viewport_left && left <= viewport_right,
+                );
+                (
+                    candidate_span.filter(|span| {
+                        !rendered_range.is_empty()
+                            && *span.end() >= rendered_range.start
+                            && *span.start() < rendered_range.end
+                    }),
+                    None,
+                )
+            };
             let position_changed = state.current != position;
             let threshold_changed = state.crossed_threshold != crossed_threshold;
             let hit_span_changed = state.hit_span != hit_span;
+            let hit_indices_changed = state.hit_indices != hit_indices;
             changed = position_changed
                 || state.current_content_y.to_bits() != current_content_y.to_bits()
                 || threshold_changed
-                || hit_span_changed;
+                || hit_span_changed
+                || hit_indices_changed;
             overlay_changed = crossed_threshold && (position_changed || threshold_changed);
-            list_changed = threshold_changed || hit_span_changed;
+            list_changed = threshold_changed || hit_span_changed || hit_indices_changed;
             state.current = position;
             state.current_content_y = current_content_y;
             state.crossed_threshold = crossed_threshold;
             state.hit_span = hit_span;
+            state.hit_indices = hit_indices;
             should_schedule = schedule_autoscroll
                 && state.crossed_threshold
                 && !state.autoscroll_scheduled
@@ -99,10 +129,10 @@ impl FileManager {
             self.schedule_rubber_autoscroll(cx);
         }
         if overlay_changed {
-            self.surfaces.invalidate_rubber_band(cx);
+            self.invalidate_surfaces(SurfaceMask::RUBBER_BAND, cx);
         }
         if list_changed {
-            self.surfaces.invalidate_file_list(cx);
+            self.invalidate_surfaces(SurfaceMask::FILE_LIST, cx);
         }
         changed
     }
@@ -212,6 +242,15 @@ impl FileManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(resize) = self.column_resize {
+            if event.dragging() {
+                let delta = f32::from(event.position.x) - resize.origin_x;
+                self.set_detail_column_width(resize.column, resize.initial_width + delta);
+                cx.set_active_drag_cursor_style(CursorStyle::ResizeLeftRight, window);
+                cx.notify();
+            }
+            return;
+        }
         if matches!(&self.pointer_interaction, PointerInteraction::RubberBand(_))
             && event.dragging()
         {

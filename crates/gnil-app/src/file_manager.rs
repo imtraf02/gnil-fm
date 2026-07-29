@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     env,
     fmt::Write as _,
     hash::{DefaultHasher, Hash, Hasher},
@@ -13,14 +13,20 @@ use std::{
 };
 
 use crate::action_menu::{
-    ActionMenuPlacement, ActionMenuState, FileMenuCommand, MenuAnimationState, MenuContext,
-    MenuEntry, prepare_context_selection,
+    ActionMenuActivation, ActionMenuPlacement, ActionMenuState, FileMenuCommand, FileMenuSubmenu,
+    MenuAnimationState, MenuContext, MenuEntry, MenuFocusTarget, MenuToolbarAction,
+    prepare_context_selection,
 };
 use crate::assets::Assets;
 use crate::device_refresh::{DEVICE_MONITOR_INTERVAL, DeviceRefresh};
 use crate::empty_space_menu::{
     EmptySpaceMenuActivation, EmptySpaceMenuCapabilities, EmptySpaceMenuCommand,
-    EmptySpaceMenuContext, EmptySpaceMenuEntry, EmptySpaceMenuState, EmptySpaceViewState,
+    EmptySpaceMenuContext, EmptySpaceMenuEntry, EmptySpaceMenuState, EmptySpaceSubmenu,
+    EmptySpaceViewState,
+};
+use crate::open_with::{
+    DesktopApplication, OpenWithCatalog, discover_applications, filter_applications,
+    launch_application, set_default_application,
 };
 use crate::path_input::{
     PathInputState, PathSuggestion, PathTarget, completion_candidates, resolve_path_input,
@@ -29,8 +35,8 @@ use crate::path_input::{
 use crate::pointer_interaction::{
     ActiveFileDrag, DropIntent, DropTarget, FileDragPayload, PointerInteraction, RUBBER_EDGE_ZONE,
     RowPressState, RubberBandState, RubberFrameGate, band_span, endpoint_index,
-    external_drop_intent, internal_drop_intent, merge_from_modifiers, movement_crossed_threshold,
-    rubber_highlighted,
+    external_drop_intent, grid_band_indices, internal_drop_intent, merge_from_modifiers,
+    movement_crossed_threshold, rubber_highlighted,
 };
 use crate::text_input::{self, TextInput, TextInputEvent};
 use crate::theme_runtime::{
@@ -51,25 +57,29 @@ use gnil_clipboard::{
     decode_file_clipboard, encode_file_clipboard,
 };
 use gnil_core::{
-    AppSettings, ConfigPaths, ConflictDecision, DirectoryLoadPhase, DirectorySnapshot,
-    EntryMetadata, FileEntry, FileKind, FileMetadata, FsOperation, JobProgress, KeymapProfile,
-    PermissionChange, RenamePair, SelectionState, SortDirection, SortField, TabRoot, TabState,
-    ThemeAppearance, ThemeCatalog, ThemeMode, TrashEntryRef, UndoRecord,
+    ActionId, AppSettings, ConfigPaths, ConflictDecision, DirectoryLoadPhase, DirectorySnapshot,
+    EntryMetadata, FileEntry, FileKind, FileLayout, FileMetadata, FsOperation, JobProgress,
+    KeymapOverrides, PermissionChange, RenamePair, SelectionState, SortDirection, SortField,
+    TabRoot, TabState, ThemeAppearance, ThemeCatalog, ThemeMode, TrashEntryRef, UndoRecord,
+    natural_cmp,
 };
 use gnil_fs::{
     DeviceEntry, DeviceKind, DirectoryWatcher, OperationExecutor, ScanOptions, SearchOptions,
     TrashEntry, WatchEvent, eject_device, mount_device, scan_devices, scan_directory_progressive,
-    scan_trash, search_paths, unmount_device,
+    scan_entry, scan_trash, search_paths, unmount_device,
 };
-use gnil_preview::{PreviewCache, PreviewError, PreviewRequest, PreviewResult, PreviewService};
+use gnil_preview::{
+    PreviewCache, PreviewError, PreviewRequest, PreviewResult, PreviewService, ThumbnailRequest,
+    ThumbnailService,
+};
 use gpui::{
     AnchoredPositionMode, Animation, AnimationExt as _, AnyElement, AnyView, App, Application,
     Bounds, ClickEvent, ClipboardItem, Context, Corner, CursorStyle, Div, DragMoveEvent, Entity,
-    ExternalFileDragMode, ExternalPaths, FocusHandle, Focusable, Hsla, KeyBinding,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    PromptLevel, Render, ScrollStrategy, SharedString, Stateful, StyleRefinement, Subscription,
-    UniformListScrollHandle, Window, WindowAppearance, WindowBounds, WindowOptions, actions,
-    anchored, deferred, div, img, point, prelude::*, px, relative, rgb, size, uniform_list,
+    ExternalPaths, FocusHandle, Focusable, Global, Hsla, KeyBinding, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PromptLevel, Render,
+    ScrollStrategy, SharedString, Stateful, StyleRefinement, Subscription, UniformListScrollHandle,
+    Window, WindowAppearance, WindowBounds, WindowOptions, actions, anchored, deferred, div, img,
+    point, prelude::*, px, relative, rgb, size, uniform_list,
 };
 
 actions!(
@@ -77,10 +87,20 @@ actions!(
     [
         SelectNext,
         SelectPrevious,
+        SelectLeft,
+        SelectRight,
         SelectNextRange,
         SelectPreviousRange,
+        SelectLeftRange,
+        SelectRightRange,
         ToggleSelection,
         OpenSelected,
+        OpenWithSelected,
+        ConfirmOpenWith,
+        DismissOpenWith,
+        OpenWithNext,
+        OpenWithPrevious,
+        ToggleOpenWithDefault,
         GoBack,
         GoForward,
         GoUp,
@@ -96,6 +116,8 @@ actions!(
         OpenCreateSymlink,
         OpenPermissions,
         OpenRename,
+        ConfirmInlineRename,
+        CancelInlineRename,
         ExtractSelected,
         ExtractSelectedTo,
         CancelOperation,
@@ -135,16 +157,20 @@ actions!(
         OpenFileSearchResult,
         ToggleFavorite,
         ToggleSettings,
+        OpenKeymap,
+        FocusSettingsSearch,
         DismissSettings,
         Quit,
     ]
 );
 
-const FILE_SIZE_COLUMN_WIDTH: f32 = 92.0;
-const FILE_MODIFIED_COLUMN_WIDTH: f32 = 132.0;
 const FILE_FAVORITE_ACTION_WIDTH: f32 = 24.0;
 const FILE_ROW_HEIGHT: f32 = 36.0;
 const TRASH_ROW_HEIGHT: f32 = 42.0;
+const GRID_ROW_HEIGHT: f32 = 190.0;
+const GRID_CARD_TARGET_WIDTH: f32 = 160.0;
+const GRID_CARD_GAP: f32 = 12.0;
+const GRID_HORIZONTAL_PADDING: f32 = 12.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RenameScope {
@@ -157,6 +183,24 @@ enum RenameScope {
 enum CreateEntryKind {
     Folder,
     File,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DetailColumn {
+    Name,
+    Modified,
+    Kind,
+    Size,
+    TrashName,
+    TrashDeleted,
+    TrashLocation,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ColumnResizeState {
+    column: DetailColumn,
+    origin_x: f32,
+    initial_width: f32,
 }
 
 struct FileSearchState {
@@ -208,10 +252,6 @@ enum OperationSheet {
         current_modes: Vec<u32>,
         octal: Entity<TextInput>,
     },
-    Rename {
-        from: PathBuf,
-        name: Entity<TextInput>,
-    },
     BulkRename {
         paths: Vec<PathBuf>,
         find: Entity<TextInput>,
@@ -224,6 +264,42 @@ enum OperationSheet {
         numbering: bool,
         scope: RenameScope,
     },
+}
+
+struct InlineRenameState {
+    path: PathBuf,
+    input: Entity<TextInput>,
+    _input_subscription: Subscription,
+    _blur_subscription: Subscription,
+}
+
+struct OpenWithChooserState {
+    path: PathBuf,
+    file_name: String,
+    mime_type: String,
+    catalog: Option<OpenWithCatalog>,
+    search: Entity<TextInput>,
+    _search_subscription: Subscription,
+    selected_desktop_id: Option<String>,
+    always_use: bool,
+    loading: bool,
+    error: Option<String>,
+    motion: OverlayMotionState,
+    serial: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum GridPreviewState {
+    Loading,
+    Thumbnail(PathBuf),
+    Text(Vec<String>),
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GridPreviewRequest {
+    key: PathBuf,
+    source: PathBuf,
 }
 
 struct DragGhost {
@@ -342,7 +418,6 @@ impl Render for FavoriteDragGhost {
 struct FileManager {
     focus_handle: FocusHandle,
     surfaces: FileManagerSurfaces,
-    _surface_subscription: Subscription,
     perf_trace: PerfTrace,
     tab: TabState,
     snapshot: Arc<DirectorySnapshot>,
@@ -352,16 +427,17 @@ struct FileManager {
     selected_paths_cache_generation: u64,
     drag_payload_cache: DragPayloadCache,
     favorite_availability: HashMap<PathBuf, bool>,
+    favorite_paths: Arc<HashSet<PathBuf>>,
     preview: Option<PreviewResult>,
     preview_path: Option<PathBuf>,
     preview_request_path: Option<PathBuf>,
     preview_generation: u64,
+    preview_debounce_generation: u64,
     preview_visible: bool,
     loading: bool,
     error: Option<String>,
     generation: u64,
     places: Vec<(String, PathBuf)>,
-    keymap: KeymapProfile,
     undo_stack: Vec<UndoRecord>,
     operation_running: bool,
     operation_cancel: Option<Arc<AtomicBool>>,
@@ -371,10 +447,14 @@ struct FileManager {
     clipboard: Option<FileClipboard>,
     action_menu: Option<ActionMenuState>,
     action_menu_serial: u64,
+    open_with_catalogs: HashMap<String, OpenWithCatalog>,
+    open_with_chooser: Option<OpenWithChooserState>,
+    open_with_serial: u64,
     empty_space_menu: Option<EmptySpaceMenuState>,
     empty_space_menu_serial: u64,
     operation_sheet: Option<OperationSheet>,
     operation_sheet_closing: bool,
+    inline_rename: Option<InlineRenameState>,
     path_input: PathInputState,
     _path_input_subscription: Subscription,
     file_search: FileSearchState,
@@ -382,34 +462,46 @@ struct FileManager {
     pending_reveal: Option<PathBuf>,
     file_list_scroll: UniformListScrollHandle,
     rendered_file_range: Range<usize>,
+    grid_columns: usize,
+    grid_card_width: f32,
+    grid_previews: HashMap<PathBuf, GridPreviewState>,
+    grid_preview_queue: VecDeque<GridPreviewRequest>,
+    grid_preview_inflight: HashSet<PathBuf>,
+    grid_preview_generation: u64,
+    grid_preview_cancel: Arc<AtomicBool>,
     pointer_interaction: PointerInteraction,
     pointer_serial: u64,
+    column_resize: Option<ColumnResizeState>,
     reduced_motion: bool,
-    trash_entries: Vec<TrashEntry>,
+    trash_entries: Arc<Vec<TrashEntry>>,
     devices: Vec<DeviceEntry>,
     device_refresh: DeviceRefresh,
     device_scan_error: Option<String>,
     auto_mount_removable: bool,
     auto_mount_attempted: HashSet<String>,
     config_paths: ConfigPaths,
+    preferences: Entity<PreferencesState>,
+    preferences_subscription: Option<Subscription>,
     settings: AppSettings,
     theme_catalog: ThemeCatalog,
     theme_appearance: ThemeAppearance,
     active_theme_name: String,
     appearance_menu_open: bool,
     appearance_menu_closing: bool,
+    command_bar_menu: Option<CommandBarMenuState>,
+    command_bar_menu_serial: u64,
+    command_bar_width_tier: CommandBarWidthTier,
     appearance_subscription: Option<Subscription>,
-    settings_open: bool,
-    settings_closing: bool,
-    settings_category: SettingsCategory,
     scan_cancel: Option<Arc<AtomicBool>>,
     preview_cancel: Option<Arc<AtomicBool>>,
     preview_service: Arc<PreviewService>,
     preview_cache: Arc<Mutex<PreviewCache>>,
+    thumbnail_service: Arc<ThumbnailService>,
     directory_watcher: Option<DirectoryWatcher>,
     watched_path: Option<PathBuf>,
-    watcher_polling: bool,
     watcher_refresh_at: Option<Instant>,
+    pending_watch_changes: PendingWatchChanges,
+    watcher_apply_running: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -419,6 +511,148 @@ enum SettingsCategory {
     Keymap,
     FileView,
     Performance,
+}
+
+struct PreferencesState {
+    config_paths: ConfigPaths,
+    settings: AppSettings,
+    keymap: KeymapOverrides,
+    keymap_error: Option<String>,
+    migrated_legacy_keymap: bool,
+}
+
+impl PreferencesState {
+    fn load(config_paths: ConfigPaths) -> Self {
+        let loaded = config_paths
+            .load_settings_with_migration()
+            .unwrap_or_else(|_| gnil_core::LoadedSettings {
+                settings: AppSettings::default(),
+                migrated_legacy_keymap: false,
+            });
+        let (keymap, keymap_error) = match config_paths.load_keymap() {
+            Ok(keymap) => {
+                let error = PreferencesWindow::keymap_validation_message(&keymap);
+                (keymap, error)
+            }
+            Err(error) => (
+                KeymapOverrides::default(),
+                Some(format!("Could not load keymap: {error}")),
+            ),
+        };
+        Self {
+            config_paths,
+            settings: loaded.settings,
+            keymap,
+            keymap_error,
+            migrated_legacy_keymap: loaded.migrated_legacy_keymap,
+        }
+    }
+
+    fn save_settings(&mut self, settings: AppSettings) -> Result<(), String> {
+        self.settings = settings;
+        self.settings.normalize();
+        self.config_paths
+            .save_settings(&self.settings)
+            .map_err(|error| error.to_string())
+    }
+
+    fn save_keymap(&mut self, mut keymap: KeymapOverrides) -> Result<(), String> {
+        keymap.normalize();
+        self.config_paths
+            .save_keymap(&keymap)
+            .map_err(|error| error.to_string())?;
+        self.keymap_error = PreferencesWindow::keymap_validation_message(&keymap);
+        self.keymap = keymap;
+        Ok(())
+    }
+}
+
+struct PreferencesRegistry {
+    state: Entity<PreferencesState>,
+    window: Option<gpui::WindowHandle<PreferencesWindow>>,
+}
+
+impl Global for PreferencesRegistry {}
+
+struct PreferencesWindow {
+    focus_handle: FocusHandle,
+    preferences: Entity<PreferencesState>,
+    settings: AppSettings,
+    config_paths: ConfigPaths,
+    keymap_overrides: KeymapOverrides,
+    keymap_error: Option<String>,
+    settings_category: SettingsCategory,
+    settings_search: Entity<TextInput>,
+    _settings_search_subscription: Subscription,
+    keymap_search: Entity<TextInput>,
+    _keymap_search_subscription: Subscription,
+    keymap_capture_subscription: Option<Subscription>,
+    keymap_edit: Option<KeymapEditState>,
+    keymap_conflict: Option<KeymapConflictState>,
+    preferences_subscription: Option<Subscription>,
+    reduced_motion: bool,
+}
+
+fn preferences_state(cx: &mut App) -> Entity<PreferencesState> {
+    if !cx.has_global::<PreferencesRegistry>() {
+        let config_paths = ConfigPaths::discover();
+        let state = cx.new(|_| PreferencesState::load(config_paths));
+        cx.set_global(PreferencesRegistry {
+            state: state.clone(),
+            window: None,
+        });
+    }
+    cx.global::<PreferencesRegistry>().state.clone()
+}
+
+fn open_preferences_window(category: SettingsCategory, cx: &mut App) {
+    let preferences = preferences_state(cx);
+    if let Some(handle) = cx.global::<PreferencesRegistry>().window
+        && handle
+            .update(cx, |settings, window, cx| {
+                settings.settings_category = category;
+                settings
+                    .settings_search
+                    .update(cx, |input, cx| input.set_text("", cx));
+                window.activate_window();
+                window.focus(&settings.focus_handle(cx));
+            })
+            .is_ok()
+    {
+        return;
+    }
+    cx.global_mut::<PreferencesRegistry>().window = None;
+
+    let bounds = Bounds::centered(None, size(px(1000.0), px(720.0)), cx);
+    match cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(780.0), px(560.0))),
+            window_background: gpui::WindowBackgroundAppearance::Opaque,
+            titlebar: Some(gpui::TitlebarOptions {
+                title: Some("gnil Settings".into()),
+                ..Default::default()
+            }),
+            app_id: Some("gnil-fm".into()),
+            ..Default::default()
+        },
+        |window, cx| {
+            cx.new(|cx| {
+                let mut preferences_window = PreferencesWindow::new(&preferences, cx);
+                preferences_window.settings_category = category;
+                window.focus(&preferences_window.focus_handle(cx));
+                preferences_window
+            })
+        },
+    ) {
+        Ok(handle) => {
+            cx.global_mut::<PreferencesRegistry>().window = Some(handle);
+            cx.activate(true);
+        }
+        Err(error) => {
+            eprintln!("Could not open preferences window: {error}");
+        }
+    }
 }
 
 impl FileManager {
@@ -455,9 +689,18 @@ impl FileManager {
         (input, subscription)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn new(path: &Path, system_appearance: ThemeAppearance, cx: &mut Context<Self>) -> Self {
-        let config_paths = ConfigPaths::discover();
-        let settings = config_paths.load_settings().unwrap_or_default();
+        let preferences = preferences_state(cx);
+        let (config_paths, settings, keymap, migrated_legacy_keymap) = {
+            let preference_snapshot = preferences.read(cx);
+            (
+                preference_snapshot.config_paths.clone(),
+                preference_snapshot.settings.clone(),
+                preference_snapshot.keymap.clone(),
+                preference_snapshot.migrated_legacy_keymap,
+            )
+        };
         let theme_catalog = ThemeCatalog::load(&config_paths.themes_dir());
         let theme_appearance = resolve_theme_appearance(settings.theme, system_appearance);
         let requested_theme = selected_theme_name(&settings, theme_appearance);
@@ -467,6 +710,7 @@ impl FileManager {
         theme_runtime::set_active(active_theme.colors);
         let tab = TabState {
             show_hidden: settings.show_hidden,
+            sort: settings.file_sort,
             ..TabState::new(path.to_path_buf())
         };
         let snapshot = DirectorySnapshot {
@@ -478,12 +722,12 @@ impl FileManager {
         };
         let (path_input, path_input_subscription) = Self::create_path_input(path, cx);
         let (file_search_input, file_search_subscription) = Self::create_file_search(cx);
-        let (surfaces, surface_subscription) = FileManagerSurfaces::install(cx);
+        let surfaces = FileManagerSurfaces::install(cx);
         let favorite_availability = favorite_availability(&settings.favorites);
-        Self {
+        let favorite_paths = Arc::new(settings.favorites.iter().cloned().collect());
+        let mut manager = Self {
             focus_handle: cx.focus_handle(),
             surfaces,
-            _surface_subscription: surface_subscription,
             perf_trace: PerfTrace::from_env(),
             tab,
             snapshot: Arc::new(snapshot),
@@ -493,29 +737,35 @@ impl FileManager {
             selected_paths_cache_generation: 0,
             drag_payload_cache: DragPayloadCache::default(),
             favorite_availability,
+            favorite_paths,
             preview: None,
             preview_path: None,
             preview_request_path: None,
             preview_generation: 0,
+            preview_debounce_generation: 0,
             preview_visible: settings.preview_enabled,
             loading: false,
             error: None,
             generation: 0,
             places: places(),
-            keymap: settings.keymap,
             undo_stack: Vec::new(),
             operation_running: false,
             operation_cancel: None,
             operation_progress: None,
             operation_progress_rx: None,
-            status_message: None,
+            status_message: migrated_legacy_keymap
+                .then(|| "Migrated legacy keyboard profile to the default keymap.".into()),
             clipboard: None,
             action_menu: None,
             action_menu_serial: 0,
+            open_with_catalogs: HashMap::new(),
+            open_with_chooser: None,
+            open_with_serial: 0,
             empty_space_menu: None,
             empty_space_menu_serial: 0,
             operation_sheet: None,
             operation_sheet_closing: false,
+            inline_rename: None,
             path_input: PathInputState::new(path_input, path.to_path_buf()),
             _path_input_subscription: path_input_subscription,
             file_search: FileSearchState::new(
@@ -527,53 +777,86 @@ impl FileManager {
             pending_reveal: None,
             file_list_scroll: UniformListScrollHandle::new(),
             rendered_file_range: 0..0,
+            grid_columns: 1,
+            grid_card_width: GRID_CARD_TARGET_WIDTH,
+            grid_previews: HashMap::new(),
+            grid_preview_queue: VecDeque::new(),
+            grid_preview_inflight: HashSet::new(),
+            grid_preview_generation: 0,
+            grid_preview_cancel: Arc::new(AtomicBool::new(false)),
             pointer_interaction: PointerInteraction::Idle,
             pointer_serial: 0,
+            column_resize: None,
             reduced_motion: settings.reduced_motion,
-            trash_entries: Vec::new(),
+            trash_entries: Arc::new(Vec::new()),
             devices: Vec::new(),
             device_refresh: DeviceRefresh::new(),
             device_scan_error: None,
             auto_mount_removable: settings.auto_mount_removable,
             auto_mount_attempted: HashSet::new(),
             config_paths,
+            preferences: preferences.clone(),
+            preferences_subscription: None,
             settings,
             theme_catalog,
             theme_appearance,
             active_theme_name,
             appearance_menu_open: false,
             appearance_menu_closing: false,
+            command_bar_menu: None,
+            command_bar_menu_serial: 0,
+            command_bar_width_tier: CommandBarWidthTier::Full,
             appearance_subscription: None,
-            settings_open: false,
-            settings_closing: false,
-            settings_category: SettingsCategory::Appearance,
             scan_cancel: None,
             preview_cancel: None,
             preview_service: Arc::new(PreviewService::default()),
             preview_cache: Arc::new(Mutex::new(PreviewCache::new(memory_cache_mib))),
+            thumbnail_service: Arc::new(ThumbnailService),
             directory_watcher: None,
             watched_path: None,
-            watcher_polling: false,
             watcher_refresh_at: None,
-        }
+            pending_watch_changes: PendingWatchChanges::default(),
+            watcher_apply_running: false,
+        };
+        manager.preferences_subscription = Some(cx.observe(&preferences, |this, state, cx| {
+            let (settings, keymap) = {
+                let state = state.read(cx);
+                (state.settings.clone(), state.keymap.clone())
+            };
+            this.sync_preferences(&settings, &keymap, cx);
+        }));
+        PreferencesWindow::install_keybindings(&keymap, cx);
+        manager.refresh_favorite_availability(cx);
+        manager
     }
 }
 
 include!("file_manager/loading.rs");
+include!("file_manager/directory_watcher.rs");
 include!("file_manager/perf_trace.rs");
 include!("file_manager/rubber_band.rs");
 include!("file_manager/file_search.rs");
 include!("file_manager/interaction.rs");
+include!("file_manager/open_with.rs");
 include!("file_manager/operations.rs");
+include!("file_manager/command_bar.rs");
+include!("file_manager/menu_geometry.rs");
+include!("file_manager/grid_preview.rs");
+include!("file_manager/detail_columns.rs");
 include!("file_manager/view_surface.rs");
 include!("file_manager/view_sidebar.rs");
 include!("file_manager/view_header.rs");
+include!("file_manager/view_command_bar.rs");
 include!("file_manager/view_appearance.rs");
+include!("file_manager/view_submenus.rs");
 include!("file_manager/view_menus.rs");
 include!("file_manager/view_operation_sheet.rs");
+include!("file_manager/view_open_with.rs");
 include!("file_manager/view_settings.rs");
+include!("file_manager/keymap.rs");
 include!("file_manager/view_lists.rs");
 include!("file_manager/view_trash.rs");
+include!("file_manager/view_grid.rs");
 include!("file_manager/view_workspace.rs");
 include!("file_manager/helpers_core.rs");
 include!("file_manager/helpers_ui.rs");
@@ -588,94 +871,6 @@ pub fn run() {
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            text_input::bind_keys(cx);
-            cx.bind_keys([
-                KeyBinding::new("down", MenuNext, Some("ActionMenu")),
-                KeyBinding::new("j", MenuNext, Some("ActionMenu")),
-                KeyBinding::new("up", MenuPrevious, Some("ActionMenu")),
-                KeyBinding::new("k", MenuPrevious, Some("ActionMenu")),
-                KeyBinding::new("home", MenuFirst, Some("ActionMenu")),
-                KeyBinding::new("end", MenuLast, Some("ActionMenu")),
-                KeyBinding::new("enter", MenuActivate, Some("ActionMenu")),
-                KeyBinding::new("space", MenuActivate, Some("ActionMenu")),
-                KeyBinding::new("right", MenuOpenSubmenu, Some("ActionMenu")),
-                KeyBinding::new("left", MenuCloseSubmenu, Some("ActionMenu")),
-                KeyBinding::new(
-                    "escape",
-                    CancelPointerInteraction,
-                    Some("PointerInteraction"),
-                ),
-                KeyBinding::new("enter", SubmitPathInput, Some("PathInput")),
-                KeyBinding::new("escape", DismissPathInput, Some("PathInput")),
-                KeyBinding::new("tab", CompletePathNext, Some("PathInput")),
-                KeyBinding::new("shift-tab", CompletePathPrevious, Some("PathInput")),
-                KeyBinding::new("up", PathHistoryPrevious, Some("PathInput")),
-                KeyBinding::new("down", PathHistoryNext, Some("PathInput")),
-                KeyBinding::new("ctrl-v", PastePath, Some("PathInput")),
-                KeyBinding::new("ctrl-l", ActivatePathInput, Some("PathInput")),
-                KeyBinding::new("enter", OpenFileSearchResult, Some("SearchInput")),
-                KeyBinding::new("down", FileSearchNext, Some("SearchInput")),
-                KeyBinding::new("up", FileSearchPrevious, Some("SearchInput")),
-                KeyBinding::new("ctrl-f", ActivateFileSearch, Some("SearchInput")),
-                KeyBinding::new("down", SelectNext, Some("FileManager")),
-                KeyBinding::new("up", SelectPrevious, Some("FileManager")),
-                KeyBinding::new("shift-down", SelectNextRange, Some("FileManager")),
-                KeyBinding::new("shift-up", SelectPreviousRange, Some("FileManager")),
-                KeyBinding::new("ctrl-space", ToggleSelection, Some("FileManager")),
-                KeyBinding::new("enter", OpenSelected, Some("FileManager")),
-                KeyBinding::new("space", TogglePreview, Some("FileManager")),
-                KeyBinding::new("alt-left", GoBack, Some("FileManager")),
-                KeyBinding::new("alt-right", GoForward, Some("FileManager")),
-                KeyBinding::new("alt-up", GoUp, Some("FileManager")),
-                KeyBinding::new("ctrl-h", ToggleHidden, Some("FileManager")),
-                KeyBinding::new("ctrl-l", ActivatePathInput, Some("FileManager")),
-                KeyBinding::new("ctrl-f", ActivateFileSearch, Some("FileManager")),
-                KeyBinding::new("ctrl-d", ToggleFavorite, Some("FileManager")),
-                KeyBinding::new("f5", Refresh, Some("FileManager")),
-                KeyBinding::new("ctrl-c", CopySelected, Some("FileManager")),
-                KeyBinding::new("ctrl-x", CutSelected, Some("FileManager")),
-                KeyBinding::new("ctrl-shift-c", CopyPathAbsolute, Some("FileManager")),
-                KeyBinding::new("ctrl-alt-c", CopyPathRelative, Some("FileManager")),
-                KeyBinding::new("ctrl-shift-l", OpenCreateSymlink, Some("FileManager")),
-                KeyBinding::new("alt-enter", OpenPermissions, Some("FileManager")),
-                KeyBinding::new("f2", OpenRename, Some("FileManager")),
-                KeyBinding::new("ctrl-e", ExtractSelected, Some("FileManager")),
-                KeyBinding::new("ctrl-shift-e", ExtractSelectedTo, Some("FileManager")),
-                KeyBinding::new("ctrl-v", Paste, Some("FileManager")),
-                KeyBinding::new("ctrl-a", SelectAllEntries, Some("FileManager")),
-                KeyBinding::new("ctrl-shift-n", CreateFolder, Some("FileManager")),
-                KeyBinding::new("delete", TrashSelected, Some("FileManager")),
-                KeyBinding::new("shift-delete", DeleteSelected, Some("FileManager")),
-                KeyBinding::new("ctrl-z", Undo, Some("FileManager")),
-                KeyBinding::new("ctrl-shift-t", ToggleAppearance, Some("FileManager")),
-                KeyBinding::new("ctrl-,", ToggleSettings, Some("FileManager")),
-                KeyBinding::new("ctrl-q", Quit, None),
-                KeyBinding::new("j", SelectNext, Some("YaziFileManager")),
-                KeyBinding::new("k", SelectPrevious, Some("YaziFileManager")),
-                KeyBinding::new("space", ToggleSelection, Some("YaziFileManager")),
-                KeyBinding::new("f3", TogglePreview, Some("YaziFileManager")),
-                KeyBinding::new("l", OpenSelected, Some("YaziFileManager")),
-                KeyBinding::new("h", GoUp, Some("YaziFileManager")),
-                KeyBinding::new("ctrl-l", ActivatePathInput, Some("YaziFileManager")),
-                KeyBinding::new("ctrl-f", ActivateFileSearch, Some("YaziFileManager")),
-                KeyBinding::new("ctrl-d", ToggleFavorite, Some("YaziFileManager")),
-                KeyBinding::new("y", CopySelected, Some("YaziFileManager")),
-                KeyBinding::new("x", CutSelected, Some("YaziFileManager")),
-                KeyBinding::new("p", Paste, Some("YaziFileManager")),
-                KeyBinding::new("ctrl-a", SelectAllEntries, Some("YaziFileManager")),
-                KeyBinding::new("ctrl-shift-n", CreateFolder, Some("YaziFileManager")),
-                KeyBinding::new("d", TrashSelected, Some("YaziFileManager")),
-                KeyBinding::new("u", Undo, Some("YaziFileManager")),
-                KeyBinding::new("ctrl-shift-t", ToggleAppearance, Some("YaziFileManager")),
-                KeyBinding::new("ctrl-shift-l", OpenCreateSymlink, Some("YaziFileManager")),
-                KeyBinding::new("alt-enter", OpenPermissions, Some("YaziFileManager")),
-                KeyBinding::new("f2", OpenRename, Some("YaziFileManager")),
-                KeyBinding::new("ctrl-e", ExtractSelected, Some("YaziFileManager")),
-                KeyBinding::new("ctrl-shift-e", ExtractSelectedTo, Some("YaziFileManager")),
-                KeyBinding::new("ctrl-,", ToggleSettings, Some("YaziFileManager")),
-                KeyBinding::new("escape", HandleEscape, None),
-                KeyBinding::new("ctrl-enter", ApplySheet, None),
-            ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
             open_main_window(&initial_path, cx);
         });
@@ -684,23 +879,25 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivateFileSearch, FileManager, FileSearchScope, HandleEscape, OperationSheet,
-        PointerInteraction, TextInput, ToggleFavorite, breadcrumb_segments, format_bytes,
-        place_is_active, resolve_theme_appearance, size_label, visible_breadcrumb_segments,
+        ActionMenuPlacement, ActionMenuState, ActivateFileSearch, EmptySpaceMenuCapabilities,
+        EmptySpaceMenuContext, EmptySpaceMenuState, EmptySpaceSubmenu, EmptySpaceViewState,
+        FileManager, FileSearchScope, HandleEscape, MenuContext, OpenRename, OperationSheet,
+        PointerInteraction, ToggleFavorite, ToggleSettings, breadcrumb_segments,
+        favorite_availability, format_bytes, place_is_active, resolve_theme_appearance, size_label,
+        visible_breadcrumb_segments,
     };
     use gnil_core::{
         ConfigPaths, DirectoryLoadPhase, DirectorySnapshot, EntryMetadata, FileEntry, FileKind,
-        FileMetadata, ThemeAppearance, ThemeMode,
+        FileMetadata, SortSpec, ThemeAppearance, ThemeMode,
     };
-    use gpui::{
-        AppContext, ExternalFileDragMode, ExternalPaths, FileDragEndedEvent, Modifiers,
-        MouseButton, TestAppContext, point, px,
-    };
+    use gpui::{ExternalPaths, Modifiers, MouseButton, TestAppContext, point, px, size};
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
         time::Duration,
     };
+
+    use crate::open_with::DesktopApplication;
 
     fn test_snapshot(entry_count: usize) -> Arc<DirectorySnapshot> {
         Arc::new(DirectorySnapshot {
@@ -732,6 +929,32 @@ mod tests {
     }
 
     #[test]
+    fn default_keymap_keeps_standard_navigation() {
+        let defaults = super::PreferencesWindow::default_keymap_entries().collect::<Vec<_>>();
+
+        assert!(defaults.contains(&("selection.next", "down")));
+        assert!(defaults.contains(&("file.copy", "ctrl-c")));
+        assert!(defaults.contains(&("settings.open_keymap", "ctrl-k ctrl-s")));
+        assert!(!defaults.contains(&("selection.next", "j")));
+    }
+
+    #[gpui::test]
+    fn settings_opens_one_native_preferences_window(cx: &mut TestAppContext) {
+        let (manager, cx) = cx.add_window_view(|_, cx| {
+            FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx)
+        });
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.toggle_settings(&ToggleSettings, window, cx);
+                manager.toggle_settings(&ToggleSettings, window, cx);
+            });
+        });
+
+        assert_eq!(cx.windows().len(), 2);
+    }
+
+    #[test]
     fn places_use_exact_path_matching() {
         let home = Path::new("/home/person");
         let downloads = Path::new("/home/person/Downloads");
@@ -743,6 +966,15 @@ mod tests {
             downloads,
         ));
         assert!(place_is_active(home, home));
+    }
+
+    #[test]
+    fn favorite_availability_is_optimistic_before_background_probe() {
+        let missing = PathBuf::from("/definitely-not-a-mounted-favorite");
+        assert_eq!(
+            favorite_availability(std::slice::from_ref(&missing)).get(&missing),
+            Some(&true)
+        );
     }
 
     #[test]
@@ -835,7 +1067,7 @@ mod tests {
             String::from_utf8(paths.to_uri_list().unwrap()).unwrap(),
             "file:///tmp/a%20file.txt\r\nfile:///tmp/%CE%B2\r\n"
         );
-        assert!(ExternalPaths::default().to_uri_list().is_none());
+        assert!(ExternalPaths::default().to_uri_list().is_err());
     }
 
     #[gpui::test]
@@ -899,6 +1131,56 @@ mod tests {
 
         assert_eq!(cx.read(|cx| manager.read(cx).tab.path.clone()), reports);
         assert!(!cx.read(|cx| manager.read(cx).file_search.open));
+    }
+
+    #[gpui::test]
+    fn navigation_publishes_the_new_empty_folder_before_scanning(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let initial_path = temp.path().join("initial");
+        let next_path = temp.path().join("next");
+        std::fs::create_dir_all(&initial_path).unwrap();
+        std::fs::create_dir_all(&next_path).unwrap();
+        std::fs::write(next_path.join("file.txt"), b"x").unwrap();
+        let initial_for_view = initial_path.clone();
+        let (manager, cx) = cx.add_window_view(move |_, cx| {
+            let mut manager = FileManager::new(&initial_for_view, ThemeAppearance::Dark, cx);
+            manager.snapshot = test_snapshot(2);
+            manager.selection.select_only(1, &manager.snapshot.entries);
+            manager
+        });
+
+        manager.update(cx, |manager, cx| {
+            manager.tab.navigate(next_path.clone());
+            manager.load_directory(cx);
+            assert_eq!(manager.snapshot.path, next_path);
+            assert!(manager.snapshot.entries.is_empty());
+            assert_eq!(manager.snapshot.phase, DirectoryLoadPhase::Discovered);
+            assert!(manager.loading);
+            assert_eq!(manager.selection.selected_count(), 0);
+            assert_eq!(manager.rendered_file_range, 0..0);
+        });
+    }
+
+    #[gpui::test]
+    fn directory_grid_card_does_not_queue_preview_io(cx: &mut TestAppContext) {
+        let (manager, cx) = cx.add_window_view(|_, cx| {
+            FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx)
+        });
+        let directory = FileEntry {
+            path: PathBuf::from("/tmp/folder"),
+            name: "folder".into(),
+            kind: FileKind::Directory,
+            hidden: false,
+            metadata: EntryMetadata::Ready(FileMetadata::default()),
+            git_status: None,
+        };
+
+        manager.update(cx, |manager, cx| {
+            let _ = manager.render_grid_preview(&directory, &directory.path, cx);
+            assert!(manager.grid_preview_queue.is_empty());
+            assert!(manager.grid_preview_inflight.is_empty());
+            assert!(!manager.grid_previews.contains_key(&directory.path));
+        });
     }
 
     #[gpui::test]
@@ -970,31 +1252,29 @@ mod tests {
     }
 
     #[gpui::test]
-    fn escape_cancels_rename_before_other_active_layers(cx: &mut TestAppContext) {
+    fn escape_cancels_inline_rename_before_other_active_layers(cx: &mut TestAppContext) {
         let (manager, cx) = cx.add_window_view(|_, cx| {
             let mut manager = FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx);
             manager.reduced_motion = true;
+            manager.snapshot = test_snapshot(1);
             manager.file_search.open = true;
-            manager.settings_open = true;
-            manager.selection.select_only(0, &test_snapshot(1).entries);
-            manager.operation_sheet = Some(OperationSheet::Rename {
-                from: PathBuf::from("/tmp/original.txt"),
-                name: cx.new(|cx| TextInput::new("New name", "edited.txt", cx)),
-            });
+            manager.selection.select_only(0, &manager.snapshot.entries);
             manager
         });
 
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
+                manager.open_rename(&OpenRename, window, cx);
+                assert!(manager.inline_rename.is_some());
+                assert!(manager.operation_sheet.is_none());
                 manager.handle_escape(&HandleEscape, window, cx);
             });
         });
 
         assert!(cx.read(|cx| {
             let manager = manager.read(cx);
-            manager.operation_sheet.is_none()
+            manager.inline_rename.is_none()
                 && manager.file_search.open
-                && manager.settings_open
                 && manager.selection.selected_count() == 1
         }));
     }
@@ -1007,7 +1287,6 @@ mod tests {
             manager.snapshot = test_snapshot(1);
             manager.selection.select_only(0, &manager.snapshot.entries);
             manager.file_search.open = true;
-            manager.settings_open = true;
             manager.operation_sheet = Some(OperationSheet::FolderProperties {
                 path: PathBuf::from("/tmp"),
                 item_count: 1,
@@ -1031,18 +1310,9 @@ mod tests {
             let manager = manager.read(cx);
             !manager.file_search.open
                 && manager.file_search.input.read(cx).text().is_empty()
-                && manager.settings_open
                 && manager.operation_sheet.is_some()
                 && manager.selection.selected_count() == 1
         }));
-
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                manager.handle_escape(&HandleEscape, window, cx);
-            });
-        });
-        assert!(!cx.read(|cx| manager.read(cx).settings_open));
-        assert!(cx.read(|cx| manager.read(cx).operation_sheet.is_some()));
 
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
@@ -1149,6 +1419,55 @@ mod tests {
     }
 
     #[gpui::test]
+    fn details_header_drag_resizes_and_persists_the_column(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let initial_path = temp.path().to_path_buf();
+        let config_paths = test_config_paths(temp.path());
+        let saved_paths = config_paths.clone();
+        let (manager, cx) = cx.add_window_view(move |_, cx| {
+            let mut manager = FileManager::new(&initial_path, ThemeAppearance::Dark, cx);
+            manager.config_paths = config_paths;
+            manager.settings.file_layout = super::FileLayout::Details;
+            manager.settings.details_columns.name = 360.0;
+            manager.snapshot = test_snapshot(2);
+            manager
+        });
+        let initial_width = cx.read(|cx| manager.read(cx).settings.details_columns.name);
+        let handle = cx
+            .debug_bounds("column-resize-0")
+            .expect("name column resize handle should be rendered");
+        let origin = point(
+            handle.left() + handle.size.width / 2.0,
+            handle.top() + handle.size.height / 2.0,
+        );
+        let current = point(origin.x + px(72.0), origin.y);
+
+        cx.simulate_mouse_down(origin, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(current, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(current, MouseButton::Left, Modifiers::none());
+
+        let resized_width = cx.read(|cx| manager.read(cx).settings.details_columns.name);
+        assert!((resized_width - (initial_width + 72.0)).abs() < 0.01);
+        assert!(cx.read(|cx| manager.read(cx).column_resize.is_none()));
+        let persisted_width = saved_paths.load_settings().unwrap().details_columns.name;
+        assert!((persisted_width - (initial_width + 72.0)).abs() < 0.01);
+        let expected_row_width = cx.read(|cx| {
+            let columns = manager.read(cx).settings.details_columns;
+            columns.name + columns.modified + columns.kind + columns.size + 16.0
+        });
+        let row_width = f32::from(
+            cx.debug_bounds("details-row-0")
+                .expect("details row should be rendered")
+                .size
+                .width,
+        );
+        assert!(
+            (row_width - expected_row_width).abs() < 1.0,
+            "row width {row_width} should match columns {expected_row_width}"
+        );
+    }
+
+    #[gpui::test]
     fn rubber_band_mouse_move_uses_a_legal_frame_callback(cx: &mut TestAppContext) {
         let (manager, cx) = cx.add_window_view(|_, cx| {
             let mut manager = FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx);
@@ -1181,6 +1500,7 @@ mod tests {
     fn selected_rows_start_one_native_file_drag(cx: &mut TestAppContext) {
         let (manager, cx) = cx.add_window_view(|_, cx| {
             let mut manager = FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx);
+            manager.settings.file_layout = super::FileLayout::Details;
             manager.snapshot = test_snapshot(3);
             manager.selection.select_only(0, &manager.snapshot.entries);
             manager.selection.toggle(1, &manager.snapshot.entries);
@@ -1209,7 +1529,7 @@ mod tests {
             Modifiers::control(),
         );
 
-        let (paths, mode) = cx
+        let paths = cx
             .take_external_file_drag()
             .expect("row drag should start a native file drag");
         assert_eq!(
@@ -1219,13 +1539,12 @@ mod tests {
                 PathBuf::from("/tmp/file-1.txt")
             ]
         );
-        assert_eq!(mode, ExternalFileDragMode::CopyOrMove);
         assert!(cx.read(|cx| matches!(
             &manager.read(cx).pointer_interaction,
             PointerInteraction::FileDrag(drag) if drag.copy
         )));
 
-        cx.simulate_event(FileDragEndedEvent);
+        cx.finish_external_file_drag();
 
         assert!(cx.read(|cx| matches!(
             manager.read(cx).pointer_interaction,
@@ -1238,6 +1557,7 @@ mod tests {
     fn dragging_an_unselected_row_exports_only_that_row(cx: &mut TestAppContext) {
         let (manager, cx) = cx.add_window_view(|_, cx| {
             let mut manager = FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx);
+            manager.settings.file_layout = super::FileLayout::Details;
             manager.snapshot = test_snapshot(3);
             manager.selection.select_only(0, &manager.snapshot.entries);
             manager
@@ -1265,7 +1585,7 @@ mod tests {
             Modifiers::none(),
         );
 
-        let (paths, _) = cx
+        let paths = cx
             .take_external_file_drag()
             .expect("row drag should start a native file drag");
         assert_eq!(paths.paths(), [PathBuf::from("/tmp/file-1.txt")]);
@@ -1277,7 +1597,7 @@ mod tests {
             vec![PathBuf::from("/tmp/file-1.txt")]
         );
 
-        cx.simulate_event(FileDragEndedEvent);
+        cx.finish_external_file_drag();
 
         assert_eq!(
             cx.read(|cx| {
@@ -1420,6 +1740,73 @@ mod tests {
         assert_eq!(cx.read(|cx| sidebar.read(cx).render_count), sidebar_before);
         assert!(cx.read(|cx| file_list.read(cx).render_count) > list_before);
     }
+
+    #[gpui::test]
+    fn selection_change_only_renders_dependent_surfaces(cx: &mut TestAppContext) {
+        let (manager, cx) = cx.add_window_view(|_, cx| {
+            let mut manager = FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx);
+            manager.snapshot = test_snapshot(2);
+            manager.preview_visible = false;
+            manager
+        });
+        let (sidebar, file_list, preview, status) = cx.read(|cx| {
+            let manager = manager.read(cx);
+            (
+                manager.surfaces.sidebar.clone(),
+                manager.surfaces.file_list.clone(),
+                manager.surfaces.preview.clone(),
+                manager.surfaces.status.clone(),
+            )
+        });
+        let sidebar_before = cx.read(|cx| sidebar.read(cx).render_count);
+        let list_before = cx.read(|cx| file_list.read(cx).render_count);
+        let preview_before = cx.read(|cx| preview.read(cx).render_count);
+        let status_before = cx.read(|cx| status.read(cx).render_count);
+
+        manager.update(cx, |manager, cx| {
+            manager.selection.select_only(1, &manager.snapshot.entries);
+            manager.selection_changed(cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(cx.read(|cx| sidebar.read(cx).render_count), sidebar_before);
+        assert_eq!(cx.read(|cx| preview.read(cx).render_count), preview_before);
+        assert!(cx.read(|cx| file_list.read(cx).render_count) > list_before);
+        assert!(cx.read(|cx| status.read(cx).render_count) > status_before);
+    }
+
+    #[gpui::test]
+    fn keyboard_preview_waits_for_debounce_window(cx: &mut TestAppContext) {
+        let (manager, cx) = cx.add_window_view(|_, cx| {
+            let mut manager = FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx);
+            manager.snapshot = test_snapshot(2);
+            manager.preview_visible = true;
+            manager
+        });
+
+        manager.update(cx, |manager, cx| {
+            manager.selection.select_only(1, &manager.snapshot.entries);
+            manager.selection_changed_debounced(cx);
+        });
+        cx.run_until_parked();
+        let generation_before_timer = cx.read(|cx| manager.read(cx).preview_generation);
+
+        cx.executor().advance_clock(Duration::from_millis(49));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read(|cx| manager.read(cx).preview_generation),
+            generation_before_timer
+        );
+
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(
+            cx.read(|cx| manager.read(cx).preview_generation) > generation_before_timer,
+            "preview loading should start after the debounce window"
+        );
+    }
+
+    include!("file_manager/tests/menu_submenus.rs");
 
     #[gpui::test]
     fn file_list_uses_exact_space_left_by_preview(cx: &mut TestAppContext) {

@@ -207,17 +207,6 @@ impl FileManager {
                     body,
                 )
             }
-            OperationSheet::Rename { name, .. } => {
-                let body = div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(field_label("NEW NAME"))
-                    .child(name.clone())
-                    .child(helper_text("The item stays in its current folder."))
-                    .into_any_element();
-                ("Rename", "One item".to_owned(), body)
-            }
             sheet @ OperationSheet::BulkRename {
                 find,
                 replace,

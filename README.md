@@ -1,14 +1,14 @@
 # gnil-fm
 
 `gnil-fm` is a native Rust file manager for Linux/Wayland. Its interface borrows the calm density
-and command model of Zed, while its filesystem engine follows Yazi's separation between browsing,
-background jobs, and bounded previews.
+and command model of Zed, while its filesystem engine separates browsing, background jobs, and
+bounded previews.
 
 ## Current MVP
 
 - GPUI Wayland shell with a virtualized file list, Quick Access sidebar and adaptive preview panel
 - ordered folder Favorites with hover actions, context-menu toggles and missing-path recovery
-- keyboard navigation, history, hidden-file toggle and system opener
+- keyboard navigation, history, hidden-file toggle, system opener and searchable XDG “Open with”
 - multi-select copy/cut/paste, native Wayland file drag-out, Copy Path, Trash, permanent deletion
   confirmation and guarded undo
 - relative/absolute symlink creation, non-recursive chmod and cycle-safe bulk rename with live preview
@@ -30,8 +30,16 @@ cargo run -p gnil-fm -- ~/Downloads
 ```
 
 The UI targets native Wayland. GPU, fontconfig, FreeType and xkbcommon libraries are supplied by the
-Nix shell. Set `GNIL_PERF_TRACE=1` when launching the app to print one-second summaries of surface
-render cost and coalesced pointer latency.
+Nix shell. Use `cargo run --profile profiling -p gnil-fm -- ~/Downloads` for a release-equivalent
+build with symbols. Set `GNIL_PERF_TRACE=1` when launching the app to print one-second summaries of
+dispatch, draw, submit and input-to-submit latency, missed frame budgets, surface invalidations,
+visible row work and coalesced pointer latency.
+
+For a one-shot launch without entering the development shell first:
+
+```sh
+nix develop -c env GNIL_PERF_TRACE=1 cargo run --profile profiling -p gnil-fm -- ~/Downloads
+```
 
 ## Keyboard
 
@@ -76,9 +84,34 @@ needs. Invalid files are skipped without preventing the application from startin
 menu shows the error count and provides a Reload action. See
 [`themes/forest-night.json`](themes/forest-night.json) for the complete version-1 schema.
 
-Set `keymap = "yazi"` to enable `j/k/l/h` navigation, Space multi-selection and `y/x/p/d/u`
-file actions. See
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for package boundaries and concurrency rules.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for package boundaries and concurrency rules.
+
+### Custom key bindings
+
+Open **Settings → Keymap & Controls** or press `Ctrl+K Ctrl+S` to search and customize
+file-manager commands. The default keymap remains active while overrides apply immediately. The
+editor can add chords, change or unbind a default key, reset one command, reset everything, and
+reload manual edits. You can add single-letter navigation or file-operation bindings if that suits
+your workflow.
+
+Overrides are stored in `$XDG_CONFIG_HOME/gnil-fm/keymap.toml`:
+
+```toml
+version = 1
+
+[[bindings]]
+action = "file.copy"
+keystrokes = "ctrl-k ctrl-c"
+kind = "bind"
+
+[[bindings]]
+action = "file.copy"
+keystrokes = "ctrl-c"
+kind = "unbind"
+```
+
+Use the **Reload** button after editing this file outside gnil-fm. Invalid files leave the active
+keymap unchanged and show an error in the editor.
 
 ## Build and package
 

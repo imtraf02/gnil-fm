@@ -1,7 +1,7 @@
 impl FileManager {
     // Declarative GPUI trees are more legible kept together than split into state-free fragments.
     #[allow(clippy::too_many_lines)]
-    fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let can_go_up = match &self.tab.root {
             TabRoot::Trash => false,
             TabRoot::Device { mount_root, .. } => self.tab.path != *mount_root,
@@ -111,7 +111,9 @@ impl FileManager {
                                     self.action_menu.as_ref().map(|menu| menu.placement),
                                     Some(ActionMenuPlacement::Header)
                                 ),
-                                |anchor| anchor.child(self.render_header_action_menu(cx)),
+                                |anchor| {
+                                    anchor.child(self.render_header_action_menu(window, cx))
+                                },
                             ),
                     )
                 },

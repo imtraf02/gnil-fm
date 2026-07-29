@@ -1,65 +1,21 @@
 impl FileManager {
-    fn cached_row_drag_payload(
-        &mut self,
-        snapshot: &Arc<DirectorySnapshot>,
-        entry: &FileEntry,
-        selected_paths: &Arc<[PathBuf]>,
-        highlighted: bool,
-    ) -> FileDragPayload {
-        if highlighted {
-            let revision = self.selection.selected_revision();
-            if revision != self.drag_payload_cache.selected_revision
-                || self.generation != self.drag_payload_cache.selected_generation
-            {
-                self.drag_payload_cache.selected.clear();
-                self.drag_payload_cache.selected_revision = revision;
-                self.drag_payload_cache.selected_generation = self.generation;
-            }
-            return self
-                .drag_payload_cache
-                .selected
-                .entry(entry.path.clone())
-                .or_insert_with(|| {
-                    FileDragPayload::new(
-                        Arc::clone(selected_paths),
-                        entry.name.clone(),
-                        file_icon_asset(entry),
-                    )
-                })
-                .clone();
-        }
-
-        let snapshot_changed = self
-            .drag_payload_cache
-            .single_snapshot
-            .as_ref()
-            .and_then(std::sync::Weak::upgrade)
-            .is_none_or(|cached| !Arc::ptr_eq(&cached, snapshot));
-        if snapshot_changed {
-            self.drag_payload_cache.single.clear();
-            self.drag_payload_cache.single_snapshot = Some(Arc::downgrade(snapshot));
-        }
-        self.drag_payload_cache
-            .single
-            .entry(entry.path.clone())
-            .or_insert_with(|| {
-                FileDragPayload::new(
-                    Arc::from([entry.path.clone()]),
-                    entry.name.clone(),
-                    file_icon_asset(entry),
-                )
-            })
-            .clone()
-    }
-
     #[allow(clippy::too_many_lines)]
     fn render_file_list(
         &mut self,
         list_focused: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.tab.root == TabRoot::Trash {
-            return self.render_trash_list(list_focused, cx);
+            if self.settings.file_layout == FileLayout::Grid {
+                self.update_grid_geometry(window);
+                return self.render_trash_grid(list_focused, cx);
+            }
+            return self.render_trash_list(list_focused, window, cx);
+        }
+        if self.settings.file_layout == FileLayout::Grid {
+            self.update_grid_geometry(window);
+            return self.render_file_grid(list_focused, cx);
         }
         let selection = self.selection.clone();
         let rubber_band = match &self.pointer_interaction {
@@ -74,7 +30,7 @@ impl FileManager {
             _ => None,
         };
         let snapshot = Arc::clone(&self.snapshot);
-        let favorites = Arc::new(self.settings.favorites.clone());
+        let favorites = Arc::clone(&self.favorite_paths);
         let selected_paths = self.selected_paths_cached();
         let count = snapshot.entries.len();
         if count == 0 {
@@ -82,6 +38,12 @@ impl FileManager {
         }
         let sort = self.tab.sort;
         let operation_running = self.operation_running;
+        let name_column_width = self.detail_column_width(DetailColumn::Name);
+        let modified_column_width = self.detail_column_width(DetailColumn::Modified);
+        let type_column_width = self.detail_column_width(DetailColumn::Kind);
+        let size_column_width = self.detail_column_width(DetailColumn::Size);
+        let row_surface_width =
+            name_column_width + modified_column_width + type_column_width + size_column_width + 16.0;
         let body = if count == 0 {
             let title = if self.loading {
                 "Opening folder…"
@@ -127,6 +89,7 @@ impl FileManager {
                 count,
                 cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                     this.rendered_file_range = range.clone();
+                    this.perf_trace.record_rows_rendered(range.len());
                     range
                         .map(|index| {
                             let entry = &snapshot.entries[index];
@@ -152,16 +115,24 @@ impl FileManager {
                                 );
                             let arm_payload = drag_payload.clone();
                             let is_drop_directory = entry.is_directory_like();
-                            let is_favorite =
-                                favorites.iter().any(|path| path == &entry.path);
-                            let row_group =
-                                format!("file-row-{}", stable_path_id(&entry.path));
+                            let is_favorite = favorites.contains(&entry.path);
+                            let rename_input = this
+                                .inline_rename
+                                .as_ref()
+                                .filter(|rename| rename.path == entry.path)
+                                .map(|rename| rename.input.clone());
+                            let renaming = rename_input.is_some();
+                            let path_id = stable_path_id(&entry.path);
+                            let row_group = format!("file-row-{path_id}");
                             let favorite_path = entry.path.clone();
                             let drop_target = DropTarget::Directory(entry.path.clone());
                             let row = div()
-                                .id(("entry", stable_path_id(&entry.path)))
+                                .id(("entry", path_id))
                                 .group(row_group.clone())
-                                .w_full()
+                                .when(index == 0, |row| {
+                                    row.debug_selector(|| "details-row-0".into())
+                                })
+                                .w(px(row_surface_width))
                                 .h(px(FILE_ROW_HEIGHT))
                                 .px_2()
                                 .rounded_md()
@@ -211,12 +182,18 @@ impl FileManager {
                                     }),
                                 )
                                 .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                                    this.select_from_click(index, event, cx);
+                                    let opens_directory = event.click_count() >= 2
+                                        && this
+                                            .snapshot
+                                            .entries
+                                            .get(index)
+                                            .is_some_and(FileEntry::is_directory_like);
+                                    this.select_from_click(index, event, !opens_directory, cx);
                                     if event.click_count() >= 2 {
                                         this.open_index(index, cx);
                                     }
                                 }))
-                                .when(!operation_running, |row| {
+                                .when(!operation_running && !renaming, |row| {
                                     row.on_drag(drag_payload, |payload, cursor_offset, _, cx| {
                                         cx.new(|_| DragGhost {
                                             payload: payload.clone(),
@@ -308,76 +285,116 @@ impl FileManager {
                                         .on_drop(|_: &FileDragPayload, _, _| {})
                                         .on_drop(|_: &ExternalPaths, _, _| {})
                                 })
-                                .child(file_icon(entry))
                                 .child(
                                     div()
-                                        .flex_1()
+                                        .w(px(name_column_width))
                                         .min_w_0()
-                                        .truncate()
-                                        .child(entry.name.clone()),
-                                )
-                                .child(if is_drop_directory {
-                                    div()
-                                        .id(("toggle-favorite", stable_path_id(&entry.path)))
-                                        .with_focus_ring()
-                                        .w(px(FILE_FAVORITE_ACTION_WIDTH))
-                                        .size_6()
                                         .flex_none()
-                                        .rounded_md()
                                         .flex()
                                         .items_center()
-                                        .justify_center()
-                                        .opacity(if highlighted { 1.0 } else { 0.0 })
-                                        .group_hover(row_group, |style| style.opacity(1.0))
-                                        .hover(|style| style.bg(rgb(border())))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.toggle_favorite_path(
-                                                favorite_path.clone(),
-                                                cx,
-                                            );
-                                        }))
-                                        .child(ui_icon(
-                                            if is_favorite {
-                                                "icons/action-star-filled.svg"
-                                            } else {
-                                                "icons/action-star.svg"
-                                            },
-                                            IconSize::Small,
-                                            if is_favorite {
-                                                IconTone::Accent
-                                            } else {
-                                                IconTone::Muted
-                                            },
-                                        ))
-                                        .into_any_element()
-                                } else {
-                                    div()
-                                        .w(px(FILE_FAVORITE_ACTION_WIDTH))
-                                        .flex_none()
-                                        .into_any_element()
-                                })
-                                .child(
-                                    div()
-                                        .w(px(FILE_SIZE_COLUMN_WIDTH))
-                                        .flex_none()
-                                        .text_xs()
-                                        .text_color(rgb(text_muted()))
-                                        .child(size_label(entry)),
+                                        .child(file_icon(entry))
+                                        .child(if let Some(input) = rename_input {
+                                            div()
+                                                .id((
+                                                    "inline-rename-details",
+                                                    path_id,
+                                                ))
+                                                .flex_1()
+                                                .min_w_0()
+                                                .on_any_mouse_down(|_, _, cx| {
+                                                    cx.stop_propagation();
+                                                })
+                                                .on_click(|_, _, cx| cx.stop_propagation())
+                                                .child(input)
+                                                .into_any_element()
+                                        } else {
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(entry.name.clone())
+                                                .into_any_element()
+                                        })
+                                        .child(if is_drop_directory {
+                                            div()
+                                                .id((
+                                                    "toggle-favorite",
+                                                    path_id,
+                                                ))
+                                                .with_focus_ring()
+                                                .w(px(FILE_FAVORITE_ACTION_WIDTH))
+                                                .size_6()
+                                                .flex_none()
+                                                .rounded_md()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .opacity(if highlighted { 1.0 } else { 0.0 })
+                                                .group_hover(row_group, |style| style.opacity(1.0))
+                                                .hover(|style| style.bg(rgb(border())))
+                                                .on_click(cx.listener(
+                                                    move |this, _, _, cx| {
+                                                        cx.stop_propagation();
+                                                        this.toggle_favorite_path(
+                                                            favorite_path.clone(),
+                                                            cx,
+                                                        );
+                                                    },
+                                                ))
+                                                .child(ui_icon(
+                                                    if is_favorite {
+                                                        "icons/action-star-filled.svg"
+                                                    } else {
+                                                        "icons/action-star.svg"
+                                                    },
+                                                    IconSize::Small,
+                                                    if is_favorite {
+                                                        IconTone::Accent
+                                                    } else {
+                                                        IconTone::Muted
+                                                    },
+                                                ))
+                                                .into_any_element()
+                                        } else {
+                                            div()
+                                                .w(px(FILE_FAVORITE_ACTION_WIDTH))
+                                                .flex_none()
+                                                .into_any_element()
+                                        }),
                                 )
                                 .child(
                                     div()
-                                        .w(px(FILE_MODIFIED_COLUMN_WIDTH))
+                                        .w(px(modified_column_width))
                                         .flex_none()
                                         .text_xs()
                                         .text_color(rgb(text_muted()))
                                         .child(modified_label(entry)),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(type_column_width))
+                                        .flex_none()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(rgb(text_muted()))
+                                        .child(type_label(entry)),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(size_column_width))
+                                        .flex_none()
+                                        .pr_2()
+                                        .text_right()
+                                        .text_xs()
+                                        .text_color(rgb(text_muted()))
+                                        .child(size_label(entry)),
                                 );
                             div().w_full().h(px(FILE_ROW_HEIGHT)).px_2().child(row)
                         })
                         .collect()
                 }),
             )
+            .item_height(px(FILE_ROW_HEIGHT))
             .track_scroll(self.file_list_scroll.clone())
             .h_full()
             .into_any_element()
@@ -404,7 +421,9 @@ impl FileManager {
                         div()
                             .id("sort-name")
                             .with_focus_ring()
-                            .flex_1()
+                            .relative()
+                            .w(px(name_column_width))
+                            .flex_none()
                             .min_w_0()
                             .cursor_pointer()
                             .text_color(if sort.field == SortField::Name {
@@ -416,36 +435,18 @@ impl FileManager {
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.sort_from_header(SortField::Name, cx);
                             }))
-                            .child(sort_label("NAME", SortField::Name, sort)),
-                    )
-                    .child(
-                        div()
-                            .w(px(FILE_FAVORITE_ACTION_WIDTH))
-                            .flex_none(),
-                    )
-                    .child(
-                        div()
-                            .id("sort-size")
-                            .with_focus_ring()
-                            .w(px(FILE_SIZE_COLUMN_WIDTH))
-                            .flex_none()
-                            .cursor_pointer()
-                            .text_color(if sort.field == SortField::Size {
-                                rgb(accent())
-                            } else {
-                                rgb(text_muted())
-                            })
-                            .hover(|style| style.text_color(rgb(theme_text())))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.sort_from_header(SortField::Size, cx);
-                            }))
-                            .child(sort_label("SIZE", SortField::Size, sort)),
+                            .child(sort_label("NAME", SortField::Name, sort))
+                            .child(Self::render_column_resize_handle(
+                                DetailColumn::Name,
+                                cx,
+                            )),
                     )
                     .child(
                         div()
                             .id("sort-modified")
                             .with_focus_ring()
-                            .w(px(FILE_MODIFIED_COLUMN_WIDTH))
+                            .relative()
+                            .w(px(modified_column_width))
                             .flex_none()
                             .cursor_pointer()
                             .text_color(if sort.field == SortField::Modified {
@@ -457,7 +458,59 @@ impl FileManager {
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.sort_from_header(SortField::Modified, cx);
                             }))
-                            .child(sort_label("MODIFIED", SortField::Modified, sort)),
+                            .child(sort_label("DATE MODIFIED", SortField::Modified, sort))
+                            .child(Self::render_column_resize_handle(
+                                DetailColumn::Modified,
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("sort-type")
+                            .with_focus_ring()
+                            .relative()
+                            .w(px(type_column_width))
+                            .flex_none()
+                            .cursor_pointer()
+                            .text_color(if sort.field == SortField::Kind {
+                                rgb(accent())
+                            } else {
+                                rgb(text_muted())
+                            })
+                            .hover(|style| style.text_color(rgb(theme_text())))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sort_from_header(SortField::Kind, cx);
+                            }))
+                            .child(sort_label("TYPE", SortField::Kind, sort))
+                            .child(Self::render_column_resize_handle(
+                                DetailColumn::Kind,
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("sort-size")
+                            .with_focus_ring()
+                            .relative()
+                            .w(px(size_column_width))
+                            .flex_none()
+                            .pr_2()
+                            .text_right()
+                            .cursor_pointer()
+                            .text_color(if sort.field == SortField::Size {
+                                rgb(accent())
+                            } else {
+                                rgb(text_muted())
+                            })
+                            .hover(|style| style.text_color(rgb(theme_text())))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sort_from_header(SortField::Size, cx);
+                            }))
+                            .child(sort_label("SIZE", SortField::Size, sort))
+                            .child(Self::render_column_resize_handle(
+                                DetailColumn::Size,
+                                cx,
+                            )),
                     ),
             )
             .child({
