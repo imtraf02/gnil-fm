@@ -189,14 +189,7 @@ impl FileManager {
                             this.begin_rubber_band(event, cx);
                         }),
                     )
-                    .child(body)
-                    .when(
-                        matches!(
-                            &self.pointer_interaction,
-                            PointerInteraction::RubberBand(state) if state.crossed_threshold
-                        ),
-                        |viewport| viewport.child(self.render_rubber_band()),
-                    ),
+                    .child(body),
             )
             .into_any_element()
     }

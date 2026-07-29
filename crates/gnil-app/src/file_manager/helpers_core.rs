@@ -208,6 +208,13 @@ fn places() -> Vec<(String, PathBuf)> {
     places
 }
 
+fn favorite_availability(favorites: &[PathBuf]) -> HashMap<PathBuf, bool> {
+    favorites
+        .iter()
+        .map(|favorite| (favorite.clone(), favorite.is_dir()))
+        .collect()
+}
+
 fn place_is_active(current_path: &Path, place_path: &Path) -> bool {
     current_path == place_path
 }

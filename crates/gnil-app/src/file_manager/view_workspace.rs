@@ -45,10 +45,10 @@ impl FileManager {
 
     fn render_rubber_band(&self) -> AnyElement {
         let PointerInteraction::RubberBand(state) = &self.pointer_interaction else {
-            return div().into_any_element();
+            return div().size_full().into_any_element();
         };
         if !state.crossed_threshold {
-            return div().into_any_element();
+            return div().size_full().into_any_element();
         }
         let (viewport, _) = self.file_list_metrics();
         let viewport_left = f32::from(viewport.left());
@@ -68,15 +68,20 @@ impl FileManager {
             .max(f32::from(state.current.y))
             .clamp(viewport_top, viewport_bottom);
         div()
-            .absolute()
-            .left(px(left - viewport_left))
-            .top(px(top - viewport_top))
-            .w(px((right - left).max(1.0)))
-            .h(px((bottom - top).max(1.0)))
-            .rounded_sm()
-            .border_1()
-            .border_color(rgb(accent()))
-            .bg(Hsla::from(rgb(accent())).opacity(0.12))
+            .size_full()
+            .child(
+                div()
+                    .debug_selector(|| "rubber-band".into())
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px((right - left).max(1.0)))
+                    .h(px((bottom - top).max(1.0)))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(accent()))
+                    .bg(Hsla::from(rgb(accent())).opacity(0.12)),
+            )
             .into_any_element()
     }
 
@@ -265,6 +270,7 @@ impl Render for FileManager {
             .on_action(cx.listener(Self::create_file))
             .on_action(cx.listener(Self::restore_trash_selected))
             .on_action(cx.listener(Self::empty_trash))
+            .on_action(cx.listener(Self::handle_escape))
             .on_action(cx.listener(Self::cancel_pointer_interaction))
             .on_action(cx.listener(Self::activate_path_input))
             .on_action(cx.listener(Self::submit_path_input))
@@ -274,11 +280,24 @@ impl Render for FileManager {
             .on_action(cx.listener(Self::path_history_previous))
             .on_action(cx.listener(Self::path_history_next))
             .on_action(cx.listener(Self::paste_path))
+            .on_action(cx.listener(Self::activate_file_search))
+            .on_action(cx.listener(Self::dismiss_file_search))
+            .on_action(cx.listener(Self::file_search_next))
+            .on_action(cx.listener(Self::file_search_previous))
+            .on_action(cx.listener(Self::open_file_search_result))
+            .on_action(cx.listener(Self::toggle_selected_favorite))
             .on_action(cx.listener(|this, _: &SelectAllEntries, _, cx| {
                 this.select_all_entries(cx);
             }))
             .on_action(cx.listener(Self::toggle_settings))
             .on_action(cx.listener(Self::dismiss_settings))
+            .on_any_mouse_down(cx.listener(
+                |this, _: &MouseDownEvent, window, cx| {
+                    if this.file_search.open {
+                        this.dismiss_file_search(&DismissFileSearch, window, cx);
+                    }
+                },
+            ))
             .on_mouse_move(cx.listener(Self::handle_pointer_move))
             .on_mouse_up(
                 MouseButton::Left,
@@ -294,6 +313,7 @@ impl Render for FileManager {
             .bg(rgb(background()))
             .text_color(rgb(text_emphasized()))
             .child(self.render_workspace(cx))
+            .child(self.surfaces.rubber_band())
             .when(
                 self.action_menu.is_some()
                     || self.empty_space_menu.is_some()

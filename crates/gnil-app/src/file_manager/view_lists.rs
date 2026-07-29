@@ -74,12 +74,12 @@ impl FileManager {
             _ => None,
         };
         let snapshot = Arc::clone(&self.snapshot);
+        let favorites = Arc::new(self.settings.favorites.clone());
         let selected_paths = self.selected_paths_cached();
         let count = snapshot.entries.len();
         if count == 0 {
             self.rendered_file_range = 0..0;
         }
-        let git_status_enabled = self.git_status_enabled;
         let sort = self.tab.sort;
         let operation_running = self.operation_running;
         let body = if count == 0 {
@@ -152,9 +152,15 @@ impl FileManager {
                                 );
                             let arm_payload = drag_payload.clone();
                             let is_drop_directory = entry.is_directory_like();
+                            let is_favorite =
+                                favorites.iter().any(|path| path == &entry.path);
+                            let row_group =
+                                format!("file-row-{}", stable_path_id(&entry.path));
+                            let favorite_path = entry.path.clone();
                             let drop_target = DropTarget::Directory(entry.path.clone());
                             let row = div()
                                 .id(("entry", stable_path_id(&entry.path)))
+                                .group(row_group.clone())
                                 .w_full()
                                 .h(px(FILE_ROW_HEIGHT))
                                 .px_2()
@@ -310,16 +316,46 @@ impl FileManager {
                                         .truncate()
                                         .child(entry.name.clone()),
                                 )
-                                .when(git_status_enabled, |row| {
-                                    row.child(
-                                        div()
-                                            .w(px(FILE_GIT_COLUMN_WIDTH))
-                                            .flex_none()
-                                            .text_xs()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(git_color(entry.git_status))
-                                            .child(git_label(entry.git_status)),
-                                    )
+                                .child(if is_drop_directory {
+                                    div()
+                                        .id(("toggle-favorite", stable_path_id(&entry.path)))
+                                        .with_focus_ring()
+                                        .w(px(FILE_FAVORITE_ACTION_WIDTH))
+                                        .size_6()
+                                        .flex_none()
+                                        .rounded_md()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .opacity(if highlighted { 1.0 } else { 0.0 })
+                                        .group_hover(row_group, |style| style.opacity(1.0))
+                                        .hover(|style| style.bg(rgb(border())))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.toggle_favorite_path(
+                                                favorite_path.clone(),
+                                                cx,
+                                            );
+                                        }))
+                                        .child(ui_icon(
+                                            if is_favorite {
+                                                "icons/action-star-filled.svg"
+                                            } else {
+                                                "icons/action-star.svg"
+                                            },
+                                            IconSize::Small,
+                                            if is_favorite {
+                                                IconTone::Accent
+                                            } else {
+                                                IconTone::Muted
+                                            },
+                                        ))
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .w(px(FILE_FAVORITE_ACTION_WIDTH))
+                                        .flex_none()
+                                        .into_any_element()
                                 })
                                 .child(
                                     div()
@@ -382,9 +418,11 @@ impl FileManager {
                             }))
                             .child(sort_label("NAME", SortField::Name, sort)),
                     )
-                    .when(git_status_enabled, |header| {
-                        header.child(div().w(px(FILE_GIT_COLUMN_WIDTH)).flex_none().child("GIT"))
-                    })
+                    .child(
+                        div()
+                            .w(px(FILE_FAVORITE_ACTION_WIDTH))
+                            .flex_none(),
+                    )
                     .child(
                         div()
                             .id("sort-size")
@@ -460,13 +498,6 @@ impl FileManager {
                         }),
                     )
                     .child(body)
-                    .when(
-                        matches!(
-                            &self.pointer_interaction,
-                            PointerInteraction::RubberBand(state) if state.crossed_threshold
-                        ),
-                        |viewport| viewport.child(self.render_rubber_band()),
-                    )
             })
             .into_any_element()
     }

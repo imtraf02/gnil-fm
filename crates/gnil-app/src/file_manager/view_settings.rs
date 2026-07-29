@@ -331,6 +331,7 @@ impl FileManager {
                             .text_xs()
                             .child(shortcut_row("Open Settings", "Ctrl+,"))
                             .child(shortcut_row("Toggle Hidden Files", "Ctrl+H"))
+                            .child(shortcut_row("Toggle Favorite", "Ctrl+D"))
                             .child(shortcut_row("Toggle Preview Panel", "Ctrl+P / F3"))
                             .child(shortcut_row("Move to Trash", "Del / d"))
                             .child(shortcut_row("Undo Operation", "Ctrl+Z / u"))
@@ -343,7 +344,6 @@ impl FileManager {
     fn render_settings_file_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let show_hidden = self.settings.show_hidden;
         let hide_gitignored = self.settings.hide_gitignored;
-        let git_status = self.settings.git_status_enabled;
         let preview = self.settings.preview_enabled;
         let auto_mount = self.settings.auto_mount_removable;
 
@@ -352,8 +352,8 @@ impl FileManager {
             .flex_col()
             .gap_6()
             .child(setting_section_header(
-                "File View & Git",
-                "Configure file browser behavior and Git indicators",
+                "File View",
+                "Configure file browser behavior and previews",
             ))
             .child(setting_row(
                 "Show Hidden Files",
@@ -380,19 +380,6 @@ impl FileManager {
                         this.load_directory(cx);
                     }))
                     .child(setting_switch(hide_gitignored)),
-            ))
-            .child(setting_row(
-                "Git Status Column",
-                "Show Git status badges for modified or untracked files",
-                div()
-                    .id("toggle-git-status")
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings.git_status_enabled = !this.settings.git_status_enabled;
-                        this.save_and_apply_settings(cx);
-                        this.load_directory(cx);
-                    }))
-                    .child(setting_switch(git_status)),
             ))
             .child(setting_row(
                 "Preview Panel",

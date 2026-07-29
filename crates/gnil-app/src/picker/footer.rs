@@ -16,6 +16,7 @@ impl Picker {
         let name_input = self.name_input.clone();
         let filter = self.render_filter(cx);
         let choices = (!self.choices.is_empty()).then(|| self.render_choices(cx));
+        let has_options = choices.is_some() || filter.is_some();
 
         div()
             .min_h(px(72.0))
@@ -43,17 +44,33 @@ impl Picker {
                     )
                 },
             )
+            .when(has_options, |footer| {
+                footer.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .when_some(choices, gpui::ParentElement::child)
+                        .when_some(filter, gpui::ParentElement::child),
+                )
+            })
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
                     .when_some(name_input, |row, input| {
-                        row.child(div().w(px(280.0)).h_9().child(input))
+                        row.child(
+                            div()
+                                .min_w(px(180.0))
+                                .max_w(px(360.0))
+                                .flex_1()
+                                .h_9()
+                                .child(input),
+                        )
                     })
-                    .when_some(choices, gpui::ParentElement::child)
                     .child(div().flex_1())
-                    .when_some(filter, gpui::ParentElement::child)
                     .child(
                         secondary_button("Cancel")
                             .id("picker-cancel")

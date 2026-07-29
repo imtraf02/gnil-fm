@@ -171,59 +171,81 @@ impl FileChooserBackend {
             return error_result();
         }
 
-        let startup = future::or(
-            async {
-                StartupState::Started(
-                    started_rx
-                        .recv()
-                        .await
-                        .unwrap_or_else(|_| Err("picker UI channel closed".into())),
-                )
-            },
-            future::or(
-                async {
-                    let _ = cancel_rx.recv().await;
-                    StartupState::Cancelled
-                },
-                async {
-                    Timer::after(STARTUP_TIMEOUT).await;
-                    StartupState::TimedOut
-                },
-            ),
+        let outcome = await_picker(
+            &self.ui,
+            &request.handle,
+            cancel_rx,
+            response_rx,
+            started_rx,
+            STARTUP_TIMEOUT,
         )
         .await;
-
-        let outcome = match startup {
-            StartupState::Started(Ok(())) => {
-                future::or(
-                    async {
-                        response_rx.recv().await.unwrap_or_else(|_| {
-                            PickerOutcome::Failed("picker UI channel closed".into())
-                        })
-                    },
-                    async {
-                        let _ = cancel_rx.recv().await;
-                        close_picker(&self.ui, request.handle.clone()).await;
-                        PickerOutcome::Cancelled
-                    },
-                )
-                .await
-            }
-            StartupState::Cancelled => {
-                close_picker(&self.ui, request.handle.clone()).await;
-                PickerOutcome::Cancelled
-            }
-            StartupState::Started(Err(error)) => PickerOutcome::Failed(error),
-            StartupState::TimedOut => {
-                close_picker(&self.ui, request.handle.clone()).await;
-                PickerOutcome::Failed("picker window creation timed out".into())
-            }
-        };
 
         let _ = object_server
             .remove::<PortalRequestObject, _>(&handle)
             .await;
         response_result(PortalResponse::from_outcome(outcome), include_writable)
+    }
+}
+
+async fn await_picker(
+    ui: &async_channel::Sender<PickerUiCommand>,
+    handle: &str,
+    cancel_rx: async_channel::Receiver<()>,
+    response_rx: async_channel::Receiver<PickerOutcome>,
+    started_rx: async_channel::Receiver<Result<(), String>>,
+    startup_timeout: Duration,
+) -> PickerOutcome {
+    let startup = future::or(
+        async {
+            StartupState::Started(
+                started_rx
+                    .recv()
+                    .await
+                    .unwrap_or_else(|_| Err("picker UI channel closed".into())),
+            )
+        },
+        future::or(
+            async {
+                let _ = cancel_rx.recv().await;
+                StartupState::Cancelled
+            },
+            async {
+                Timer::after(startup_timeout).await;
+                StartupState::TimedOut
+            },
+        ),
+    )
+    .await;
+
+    match startup {
+        StartupState::Started(Ok(())) => {
+            future::or(
+                async {
+                    response_rx.recv().await.unwrap_or_else(|_| {
+                        PickerOutcome::Failed("picker UI channel closed".into())
+                    })
+                },
+                async {
+                    let _ = cancel_rx.recv().await;
+                    close_picker(ui, handle.to_owned()).await;
+                    PickerOutcome::Cancelled
+                },
+            )
+            .await
+        }
+        StartupState::Cancelled => {
+            close_picker(ui, handle.to_owned()).await;
+            PickerOutcome::Cancelled
+        }
+        StartupState::Started(Err(error)) => {
+            close_picker(ui, handle.to_owned()).await;
+            PickerOutcome::Failed(error)
+        }
+        StartupState::TimedOut => {
+            close_picker(ui, handle.to_owned()).await;
+            PickerOutcome::Failed("picker window creation timed out".into())
+        }
     }
 }
 
@@ -334,5 +356,115 @@ mod tests {
         let (code, results) = response_result(PortalResponse::cancelled(), false);
         assert_eq!(code, 1);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn errors_have_no_result_payload() {
+        let (code, results) = response_result(PortalResponse::error(), true);
+        assert_eq!(code, 2);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn request_close_is_idempotent() {
+        zbus::block_on(async {
+            let (cancel, cancelled) = async_channel::bounded(1);
+            let request = PortalRequestObject { cancel };
+
+            request.close().await;
+            request.close().await;
+
+            assert!(cancelled.recv().await.is_ok());
+            assert!(cancelled.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn startup_failure_closes_only_its_picker() {
+        zbus::block_on(async {
+            let (ui, commands) = async_channel::unbounded();
+            let (_cancel, cancel_rx) = async_channel::bounded(1);
+            let (_response, response_rx) = async_channel::bounded(1);
+            let (started, started_rx) = async_channel::bounded(1);
+            started.send(Err("window failed".into())).await.unwrap();
+
+            let outcome = await_picker(
+                &ui,
+                "/request/failure",
+                cancel_rx,
+                response_rx,
+                started_rx,
+                Duration::from_secs(1),
+            )
+            .await;
+
+            assert_eq!(outcome, PickerOutcome::Failed("window failed".into()));
+            assert!(matches!(
+                commands.recv().await,
+                Ok(PickerUiCommand::Close { handle }) if handle == "/request/failure"
+            ));
+        });
+    }
+
+    #[test]
+    fn concurrent_picker_results_do_not_share_state() {
+        zbus::block_on(async {
+            let (ui, _commands) = async_channel::unbounded();
+            let (_cancel_a, cancel_rx_a) = async_channel::bounded(1);
+            let (_cancel_b, cancel_rx_b) = async_channel::bounded(1);
+            let (response_a, response_rx_a) = async_channel::bounded(1);
+            let (response_b, response_rx_b) = async_channel::bounded(1);
+            let (started_a, started_rx_a) = async_channel::bounded(1);
+            let (started_b, started_rx_b) = async_channel::bounded(1);
+            started_a.send(Ok(())).await.unwrap();
+            started_b.send(Ok(())).await.unwrap();
+            response_a
+                .send(PickerOutcome::Accepted {
+                    paths: vec!["/tmp/a".into()],
+                    choices: vec![("encoding".into(), "utf8".into())],
+                    current_filter: None,
+                })
+                .await
+                .unwrap();
+            response_b
+                .send(PickerOutcome::Accepted {
+                    paths: vec!["/tmp/b".into()],
+                    choices: vec![("encoding".into(), "latin1".into())],
+                    current_filter: None,
+                })
+                .await
+                .unwrap();
+
+            let first = await_picker(
+                &ui,
+                "/request/a",
+                cancel_rx_a,
+                response_rx_a,
+                started_rx_a,
+                Duration::from_secs(1),
+            );
+            let second = await_picker(
+                &ui,
+                "/request/b",
+                cancel_rx_b,
+                response_rx_b,
+                started_rx_b,
+                Duration::from_secs(1),
+            );
+            let (first, second) = future::zip(first, second).await;
+
+            assert!(matches!(
+                first,
+                PickerOutcome::Accepted { paths, choices, .. }
+                    if paths == [std::path::PathBuf::from("/tmp/a")]
+                        && choices == [("encoding".into(), "utf8".into())]
+            ));
+            assert!(matches!(
+                second,
+                PickerOutcome::Accepted { paths, choices, .. }
+                    if paths == [std::path::PathBuf::from("/tmp/b")]
+                        && choices == [("encoding".into(), "latin1".into())]
+            ));
+        });
     }
 }

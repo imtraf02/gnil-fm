@@ -270,9 +270,10 @@ impl Picker {
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
-                active_filter
-                    .as_ref()
-                    .is_none_or(|filter| filter.matches(&entry.path))
+                entry_is_directory(entry)
+                    || active_filter
+                        .as_ref()
+                        .is_none_or(|filter| filter.matches(&entry.path))
             })
             .filter_map(|(index, entry)| {
                 if query.is_empty() {

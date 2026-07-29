@@ -2,6 +2,7 @@ use crate::{
     Bounds, Capslock, Context, Empty, IntoElement, Keystroke, Modifiers, Pixels, Point, Render,
     Window, point, seal::Sealed,
 };
+use http_client::Url;
 use smallvec::SmallVec;
 use std::{any::Any, fmt::Debug, ops::Deref, path::PathBuf};
 
@@ -492,14 +493,54 @@ impl Deref for MouseExitEvent {
     }
 }
 
-/// A collection of paths from the platform, such as from a file drop.
-#[derive(Debug, Clone, Default)]
+/// A collection of paths exchanged with the platform, such as from a file drop.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct ExternalPaths(pub(crate) SmallVec<[PathBuf; 2]>);
 
 impl ExternalPaths {
+    /// Create a collection of paths for a platform file drag.
+    pub fn new(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self(paths.into_iter().collect())
+    }
+
     /// Convert this collection of paths into a slice.
     pub fn paths(&self) -> &[PathBuf] {
         &self.0
+    }
+
+    /// Encode these paths as a `text/uri-list` payload for native drag-and-drop.
+    pub fn to_uri_list(&self) -> Option<Vec<u8>> {
+        if self.0.is_empty() {
+            return None;
+        }
+        let mut uri_list = String::new();
+        for path in &self.0 {
+            let path = std::path::absolute(path).ok()?;
+            let uri = Url::from_file_path(path).ok()?;
+            uri_list.push_str(uri.as_str());
+            uri_list.push_str("\r\n");
+        }
+        Some(uri_list.into_bytes())
+    }
+}
+
+/// The operations offered to another application during a native file drag.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ExternalFileDragMode {
+    /// The destination may only copy or consume the dragged paths.
+    CopyOnly,
+    /// The destination may negotiate either a copy or move operation.
+    CopyOrMove,
+}
+
+/// Signals that a native file drag started by this application has ended.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FileDragEndedEvent;
+
+impl Sealed for FileDragEndedEvent {}
+impl InputEvent for FileDragEndedEvent {
+    fn to_platform_input(self) -> PlatformInput {
+        PlatformInput::FileDragEnded(self)
     }
 }
 
@@ -563,6 +604,8 @@ pub enum PlatformInput {
     ScrollWheel(ScrollWheelEvent),
     /// Files were dragged and dropped onto the window.
     FileDrop(FileDropEvent),
+    /// A native file drag started by this application has ended.
+    FileDragEnded(FileDragEndedEvent),
 }
 
 impl PlatformInput {
@@ -577,6 +620,7 @@ impl PlatformInput {
             PlatformInput::MouseExited(event) => Some(event),
             PlatformInput::ScrollWheel(event) => Some(event),
             PlatformInput::FileDrop(event) => Some(event),
+            PlatformInput::FileDragEnded(_) => None,
         }
     }
 
@@ -591,6 +635,7 @@ impl PlatformInput {
             PlatformInput::MouseExited(_) => None,
             PlatformInput::ScrollWheel(_) => None,
             PlatformInput::FileDrop(_) => None,
+            PlatformInput::FileDragEnded(_) => None,
         }
     }
 }

@@ -1,4 +1,44 @@
 impl FileManager {
+    fn handle_escape(
+        &mut self,
+        _: &HandleEscape,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(
+            self.operation_sheet.as_ref(),
+            Some(OperationSheet::Rename { .. } | OperationSheet::BulkRename { .. })
+        ) {
+            self.dismiss_sheet(&DismissSheet, window, cx);
+            window.focus(&self.focus_handle(cx));
+            return;
+        }
+        if self.file_search.open {
+            self.dismiss_file_search(&DismissFileSearch, window, cx);
+            return;
+        }
+        if self.settings_open {
+            self.dismiss_settings(&DismissSettings, window, cx);
+            return;
+        }
+        if self.operation_sheet.is_some() {
+            self.dismiss_sheet(&DismissSheet, window, cx);
+            window.focus(&self.focus_handle(cx));
+            return;
+        }
+        if self.appearance_menu_open
+            || self.action_menu.is_some()
+            || self.empty_space_menu.is_some()
+        {
+            self.dismiss_menu(&DismissMenu, window, cx);
+            return;
+        }
+        if self.selection.clear() {
+            window.focus(&self.focus_handle(cx));
+            self.selection_changed(cx);
+        }
+    }
+
     fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
         if self.selection.move_cursor(1, &self.snapshot.entries, false) {
             self.selection_changed(cx);
@@ -130,6 +170,9 @@ impl FileManager {
             || self.appearance_menu_open
         {
             return;
+        }
+        if self.file_search.open {
+            self.finish_file_search_close(cx);
         }
         if self.path_input.editing {
             self.path_input.input.update(cx, |input, cx| {
@@ -450,7 +493,6 @@ impl FileManager {
         } else if preview_was_visible {
             self.cancel_preview_request();
         }
-        self.git_status_enabled = self.settings.git_status_enabled;
         self.auto_mount_removable = self.settings.auto_mount_removable;
         self.reduced_motion = self.settings.reduced_motion;
         self.preview_cache
@@ -549,6 +591,116 @@ impl FileManager {
         }
     }
 
+    fn selected_favorite_candidate(&self) -> Option<PathBuf> {
+        let paths = self.selection.effective_paths(&self.snapshot.entries);
+        let [path] = paths.as_slice() else {
+            return None;
+        };
+        self.snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.path == *path && entry.is_directory_like())
+            .map(|entry| entry.path.clone())
+    }
+
+    fn toggle_selected_favorite(
+        &mut self,
+        _: &ToggleFavorite,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(path) = self.selected_favorite_candidate() {
+            self.toggle_favorite_path(path, cx);
+        }
+    }
+
+    fn toggle_favorite_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .settings
+            .favorites
+            .iter()
+            .position(|favorite| favorite == &path)
+        {
+            self.settings.favorites.remove(index);
+            self.favorite_availability.remove(&path);
+            self.status_message = Some("Removed from Favorites".into());
+        } else {
+            let available = path.is_dir();
+            self.favorite_availability.insert(path.clone(), available);
+            self.settings.favorites.push(path);
+            self.status_message = Some("Added to Favorites".into());
+        }
+        self.save_settings();
+        cx.notify();
+    }
+
+    fn remove_favorite_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let count = self.settings.favorites.len();
+        self.settings
+            .favorites
+            .retain(|favorite| favorite != path);
+        if self.settings.favorites.len() != count {
+            self.favorite_availability.remove(path);
+            self.status_message = Some("Removed unavailable favorite".into());
+            self.save_settings();
+            cx.notify();
+        }
+    }
+
+    fn reorder_favorite_path(&mut self, source: &Path, target_index: usize, cx: &mut Context<Self>) {
+        let Some(source_index) = self
+            .settings
+            .favorites
+            .iter()
+            .position(|favorite| favorite == source)
+        else {
+            return;
+        };
+        if source_index == target_index {
+            return;
+        }
+        let favorite = self.settings.favorites.remove(source_index);
+        let insertion = target_index.min(self.settings.favorites.len());
+        self.settings.favorites.insert(insertion, favorite);
+        self.save_settings();
+        cx.notify();
+    }
+
+    fn refresh_favorite_availability(&mut self) {
+        self.favorite_availability = self
+            .settings
+            .favorites
+            .iter()
+            .map(|favorite| (favorite.clone(), favorite.is_dir()))
+            .collect();
+    }
+
+    fn open_favorite(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if path.is_dir() {
+            self.pending_reveal = None;
+            self.tab.navigate(path);
+            self.load_directory(cx);
+            return;
+        }
+        let detail = path.display().to_string();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Remove this unavailable favorite?",
+            Some(&detail),
+            &["Remove from Favorites", "Keep"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await.ok() != Some(0) {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.remove_favorite_path(&path, cx);
+            });
+        })
+        .detach();
+    }
+
     fn system_appearance_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings.theme == ThemeMode::System {
             self.apply_selected_theme(window_theme_appearance(window), cx);
@@ -565,6 +717,7 @@ impl FileManager {
         let context = MenuContext::from_selection(
             &self.selection,
             &self.snapshot.entries,
+            &self.settings.favorites,
             clipboard_valid,
             self.operation_running,
         );
@@ -623,7 +776,6 @@ impl FileManager {
             sort: self.tab.sort,
             view: EmptySpaceViewState {
                 show_hidden: self.tab.show_hidden,
-                git_status_enabled: self.git_status_enabled,
             },
         };
         self.empty_space_menu_serial = self.empty_space_menu_serial.wrapping_add(1);
@@ -820,6 +972,9 @@ impl FileManager {
             FileMenuCommand::Cut => self.cut_selected(&CutSelected, window, cx),
             FileMenuCommand::Paste => self.paste(&Paste, window, cx),
             FileMenuCommand::Rename => self.open_rename(&OpenRename, window, cx),
+            FileMenuCommand::ToggleFavorite => {
+                self.toggle_selected_favorite(&ToggleFavorite, window, cx);
+            }
             FileMenuCommand::CreateSymlink => {
                 self.open_create_symlink(&OpenCreateSymlink, window, cx);
             }
@@ -862,7 +1017,6 @@ impl FileManager {
             EmptySpaceMenuCommand::ToggleHidden => {
                 self.toggle_hidden(&ToggleHidden, window, cx);
             }
-            EmptySpaceMenuCommand::ToggleGitStatus => self.toggle_git_status(cx),
             EmptySpaceMenuCommand::SelectAll => self.select_all_entries(cx),
             EmptySpaceMenuCommand::OpenTerminal => self.open_terminal_here(cx),
             EmptySpaceMenuCommand::FolderProperties => self.open_folder_properties(cx),

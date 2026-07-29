@@ -26,10 +26,11 @@ use wayland_protocols::{
 use wayland_protocols_plasma::blur::client::org_kde_kwin_blur;
 
 use crate::{
-    AnyWindowHandle, Bounds, Decorations, Globals, GpuSpecs, Modifiers, Output, Pixels,
-    PlatformDisplay, PlatformInput, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    ResizeEdge, Size, Tiling, WaylandClientStatePtr, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowControls, WindowDecorations, WindowParams, px, size,
+    AnyWindowHandle, Bounds, Decorations, ExternalFileDragMode, ExternalPaths, Globals, GpuSpecs,
+    Modifiers, Output, Pixels, PlatformDisplay, PlatformInput, Point, PromptButton, PromptLevel,
+    RequestFrameOptions, ResizeEdge, Size, Tiling, WaylandClientStatePtr, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls, WindowDecorations,
+    WindowParams, px, size,
 };
 use crate::{
     Capslock,
@@ -1071,6 +1072,13 @@ impl PlatformWindow for WaylandWindow {
         let state = self.borrow();
         let serial = state.client.get_serial(SerialKind::MousePress);
         state.toplevel._move(&state.globals.seat, serial);
+    }
+
+    fn start_external_file_drag(&self, paths: ExternalPaths, mode: ExternalFileDragMode) -> bool {
+        let state = self.borrow();
+        state
+            .client
+            .start_external_file_drag(state.surface.clone(), paths, mode)
     }
 
     fn start_window_resize(&self, edge: crate::ResizeEdge) {

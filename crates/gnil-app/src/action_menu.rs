@@ -19,6 +19,7 @@ pub(crate) enum FileMenuCommand {
     Cut,
     Paste,
     Rename,
+    ToggleFavorite,
     CreateSymlink,
     Permissions,
     CopyPathAbsolute,
@@ -75,12 +76,15 @@ pub(crate) struct MenuContext {
     pub(crate) clipboard_valid: bool,
     pub(crate) operation_running: bool,
     pub(crate) all_selected_archives: bool,
+    pub(crate) favorite_eligible: bool,
+    pub(crate) selected_is_favorite: bool,
 }
 
 impl MenuContext {
     pub(crate) fn from_selection(
         selection: &SelectionState,
         entries: &[FileEntry],
+        favorites: &[std::path::PathBuf],
         clipboard_valid: bool,
         operation_running: bool,
     ) -> Self {
@@ -90,6 +94,8 @@ impl MenuContext {
             .iter()
             .filter(|entry| selected.contains(&entry.path))
             .collect();
+        let favorite_eligible =
+            selected_entries.len() == 1 && selected_entries[0].is_directory_like();
         Self {
             selected_count: selected_paths.len(),
             permissions_supported: !selected_entries.is_empty()
@@ -105,6 +111,11 @@ impl MenuContext {
                 && selected_entries
                     .iter()
                     .all(|entry| is_archive_candidate(&entry.path)),
+            favorite_eligible,
+            selected_is_favorite: favorite_eligible
+                && favorites
+                    .iter()
+                    .any(|path| path == &selected_entries[0].path),
         }
     }
 }
@@ -180,25 +191,7 @@ impl ActionMenuState {
                 has_selection && writes_enabled,
             ),
         ];
-        if context.all_selected_archives {
-            entries.splice(
-                1..1,
-                [
-                    action(
-                        FileMenuCommand::Extract,
-                        "Extract",
-                        Some("Ctrl+E"),
-                        writes_enabled,
-                    ),
-                    action(
-                        FileMenuCommand::ExtractTo,
-                        "Extract to…",
-                        Some("Ctrl+Shift+E"),
-                        writes_enabled,
-                    ),
-                ],
-            );
-        }
+        add_contextual_actions(&mut entries, context, writes_enabled);
         let focused = entries.iter().position(is_selectable);
         Self {
             placement,
@@ -280,6 +273,60 @@ fn action(
         enabled,
         danger: false,
     }
+}
+
+fn add_contextual_actions(
+    entries: &mut Vec<MenuEntry>,
+    context: MenuContext,
+    writes_enabled: bool,
+) {
+    if context.all_selected_archives {
+        entries.splice(
+            1..1,
+            [
+                action(
+                    FileMenuCommand::Extract,
+                    "Extract",
+                    Some("Ctrl+E"),
+                    writes_enabled,
+                ),
+                action(
+                    FileMenuCommand::ExtractTo,
+                    "Extract to…",
+                    Some("Ctrl+Shift+E"),
+                    writes_enabled,
+                ),
+            ],
+        );
+    }
+    if !context.favorite_eligible {
+        return;
+    }
+    let rename_index = entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                MenuEntry::Action {
+                    command: FileMenuCommand::Rename,
+                    ..
+                }
+            )
+        })
+        .unwrap_or(0);
+    entries.insert(
+        rename_index + 1,
+        action(
+            FileMenuCommand::ToggleFavorite,
+            if context.selected_is_favorite {
+                "Remove from Favorites"
+            } else {
+                "Add to Favorites"
+            },
+            Some("Ctrl+D"),
+            true,
+        ),
+    );
 }
 
 fn dangerous_action(
@@ -366,7 +413,7 @@ mod tests {
         let entries = entries();
         let mut selection = SelectionState::default();
         selection.select_only(0, &entries);
-        let single = MenuContext::from_selection(&selection, &entries, false, false);
+        let single = MenuContext::from_selection(&selection, &entries, &[], false, false);
         let single = ActionMenuState::new(ActionMenuPlacement::Header, single, 1);
         assert!(is_enabled(command(&single, FileMenuCommand::Open)));
         assert!(is_enabled(command(&single, FileMenuCommand::Permissions)));
@@ -379,7 +426,7 @@ mod tests {
         ));
 
         selection.extend_to(1, &entries);
-        let multiple = MenuContext::from_selection(&selection, &entries, false, false);
+        let multiple = MenuContext::from_selection(&selection, &entries, &[], false, false);
         let multiple = ActionMenuState::new(ActionMenuPlacement::Header, multiple, 2);
         assert!(!is_enabled(command(&multiple, FileMenuCommand::Open)));
         assert!(matches!(
@@ -393,11 +440,41 @@ mod tests {
     }
 
     #[test]
+    fn folder_context_menu_toggles_favorite_label() {
+        let entries = entries();
+        let mut selection = SelectionState::default();
+        selection.select_only(1, &entries);
+
+        let add = MenuContext::from_selection(&selection, &entries, &[], false, false);
+        let add = ActionMenuState::new(ActionMenuPlacement::Header, add, 1);
+        assert!(matches!(
+            command(&add, FileMenuCommand::ToggleFavorite),
+            MenuEntry::Action {
+                label: "Add to Favorites",
+                enabled: true,
+                ..
+            }
+        ));
+
+        let favorites = [entries[1].path.clone()];
+        let remove = MenuContext::from_selection(&selection, &entries, &favorites, false, false);
+        let remove = ActionMenuState::new(ActionMenuPlacement::Header, remove, 2);
+        assert!(matches!(
+            command(&remove, FileMenuCommand::ToggleFavorite),
+            MenuEntry::Action {
+                label: "Remove from Favorites",
+                enabled: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn symlinks_disable_permissions_and_operation_locks_writes() {
         let entries = entries();
         let mut selection = SelectionState::default();
         selection.select_only(2, &entries);
-        let context = MenuContext::from_selection(&selection, &entries, true, true);
+        let context = MenuContext::from_selection(&selection, &entries, &[], true, true);
         let menu = ActionMenuState::new(ActionMenuPlacement::Header, context, 1);
         assert!(!is_enabled(command(&menu, FileMenuCommand::Permissions)));
         assert!(!is_enabled(command(&menu, FileMenuCommand::Paste)));
@@ -416,6 +493,7 @@ mod tests {
                 clipboard_valid: false,
                 operation_running: false,
                 all_selected_archives: false,
+                ..MenuContext::default()
             },
             1,
         );
@@ -480,6 +558,7 @@ mod tests {
                 clipboard_valid: true,
                 operation_running: false,
                 all_selected_archives: false,
+                ..MenuContext::default()
             },
             2,
         );

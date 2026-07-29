@@ -347,30 +347,12 @@ fn file_icon_asset(entry: &FileEntry) -> &'static str {
     }
 }
 
-fn git_label(status: Option<GitStatus>) -> &'static str {
-    match status {
-        Some(GitStatus::Modified) => "M",
-        Some(GitStatus::Added) => "A",
-        Some(GitStatus::Deleted) => "D",
-        Some(GitStatus::Untracked) => "U",
-        Some(GitStatus::Conflicted) => "!",
-        None => "",
-    }
-}
-
-fn git_color(status: Option<GitStatus>) -> gpui::Hsla {
-    match status {
-        Some(GitStatus::Added) => rgb(git_added()).into(),
-        Some(GitStatus::Deleted | GitStatus::Conflicted) => rgb(git_deleted()).into(),
-        Some(GitStatus::Modified) => rgb(git_modified()).into(),
-        Some(GitStatus::Untracked) => rgb(git_untracked()).into(),
-        None => rgb(border_focused()).into(),
-    }
-}
-
 fn size_label(entry: &FileEntry) -> String {
     if entry.kind == FileKind::Directory {
-        "—".into()
+        entry
+            .metadata()
+            .and_then(|metadata| metadata.child_count)
+            .map_or_else(|| "—".into(), item_count_label)
     } else {
         entry
             .metadata()
@@ -378,8 +360,16 @@ fn size_label(entry: &FileEntry) -> String {
     }
 }
 
+fn item_count_label(count: u64) -> String {
+    if count == 1 {
+        "1 item".to_owned()
+    } else {
+        format!("{count} items")
+    }
+}
+
 fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     if bytes < 1024 {
         return format!("{bytes} B");
     }
@@ -389,9 +379,20 @@ fn format_bytes(bytes: u64) -> String {
         divisor = divisor.saturating_mul(1024);
         unit += 1;
     }
-    let whole = bytes / divisor;
-    let decimal = (bytes % divisor).saturating_mul(10) / divisor;
-    format!("{whole}.{decimal} {}", UNITS[unit])
+    let mut whole = bytes / divisor;
+    let mut decimal = (bytes % divisor)
+        .saturating_mul(10)
+        .saturating_add(divisor / 2)
+        / divisor;
+    if decimal == 10 {
+        whole = whole.saturating_add(1);
+        decimal = 0;
+    }
+    if decimal == 0 {
+        format!("{whole} {}", UNITS[unit])
+    } else {
+        format!("{whole}.{decimal} {}", UNITS[unit])
+    }
 }
 
 fn modified_label(entry: &FileEntry) -> String {

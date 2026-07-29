@@ -218,8 +218,16 @@ fn read_metadata(entry: &FileEntry) -> io::Result<FileMetadata> {
             classify_file_type(target.file_type())
         })
     });
+    let child_count = (entry.kind == FileKind::Directory)
+        .then(|| {
+            fs::read_dir(&entry.path)
+                .ok()
+                .and_then(|children| u64::try_from(children.count()).ok())
+        })
+        .flatten();
     Ok(FileMetadata {
         len: metadata.len(),
+        child_count,
         modified_unix_ms,
         mode,
         readonly: metadata.permissions().readonly(),
@@ -268,7 +276,11 @@ mod tests {
         fs::write(root.path().join("file10"), b"x").unwrap();
         fs::write(root.path().join("file2"), b"x").unwrap();
         fs::write(root.path().join(".secret"), b"x").unwrap();
-        fs::create_dir(root.path().join("folder")).unwrap();
+        let folder = root.path().join("folder");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("direct-child"), b"x").unwrap();
+        fs::create_dir(folder.join("nested")).unwrap();
+        fs::write(folder.join("nested/deep-child"), b"x").unwrap();
 
         let snapshot = scan_directory(root.path(), ScanOptions::default()).unwrap();
         let names: Vec<_> = snapshot
@@ -277,6 +289,16 @@ mod tests {
             .map(|entry| entry.name.as_str())
             .collect();
         assert_eq!(names, ["folder", "file2", "file10"]);
+        assert_eq!(
+            snapshot.entries[0]
+                .metadata()
+                .and_then(|metadata| metadata.child_count),
+            Some(2)
+        );
+        assert_eq!(
+            snapshot.entries[1].metadata().map(|metadata| metadata.len),
+            Some(1)
+        );
     }
 
     #[cfg(unix)]

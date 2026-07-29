@@ -5,8 +5,15 @@ impl FileManager {
             cancelled.store(true, Ordering::Relaxed);
         }
         self.cancel_preview_request();
+        self.refresh_favorite_availability();
         self.action_menu = None;
         self.empty_space_menu = None;
+        if self.file_search.open
+            && self.file_search.scope == FileSearchScope::CurrentFolder
+            && self.file_search.root != self.tab.path
+        {
+            self.finish_file_search_close(cx);
+        }
         match std::mem::take(&mut self.pointer_interaction) {
             PointerInteraction::RowArmed(press) => {
                 press.payload.visual.set_lifted(false);
@@ -41,7 +48,6 @@ impl FileManager {
         let preserve_selection = self.snapshot.path == path;
         let show_hidden = self.tab.show_hidden;
         let sort = self.tab.sort;
-        let git_status_enabled = self.git_status_enabled;
         let respect_gitignore = self.settings.hide_gitignored;
         let metadata_workers = self.settings.worker_threads;
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -65,7 +71,7 @@ impl FileManager {
                     sort,
                     respect_gitignore,
                     metadata_workers,
-                    include_git_status: git_status_enabled,
+                    include_git_status: false,
                 },
                 &cancelled,
                 |snapshot| {
@@ -461,7 +467,15 @@ impl FileManager {
                 self.selection
                     .select_only(press.index, &self.snapshot.entries);
             }
+            let native_drag_started = window.start_external_file_drag(
+                ExternalPaths::new(press.payload.paths.iter().cloned()),
+                ExternalFileDragMode::CopyOrMove,
+            );
             self.pointer_interaction = PointerInteraction::FileDrag(ActiveFileDrag { press, copy });
+            if !native_drag_started {
+                self.status_message =
+                    Some("External drag is unavailable in this Wayland session".into());
+            }
             if selection_changed {
                 self.selection_changed(cx);
                 visual_changed = false;

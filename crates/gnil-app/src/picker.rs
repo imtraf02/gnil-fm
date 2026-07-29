@@ -165,7 +165,7 @@ fn open_picker_window(
         Ok(window) => {
             windows.borrow_mut().insert(handle_key, window.into());
             let _ = window.update(cx, |picker, window, cx| {
-                window.focus(&picker.focus_handle(cx));
+                window.focus(&picker.initial_focus_handle(cx));
             });
             cx.activate(true);
             let _ = started.try_send(Ok(()));
@@ -250,6 +250,18 @@ impl gpui::Focusable for Picker {
         self.focus.clone()
     }
 }
+
+impl Picker {
+    fn initial_focus_handle(&self, cx: &App) -> FocusHandle {
+        self.name_input.as_ref().map_or_else(
+            || self.focus.clone(),
+            |input| input.read(cx).focus_handle(cx),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests;
 
 impl Drop for Picker {
     fn drop(&mut self) {

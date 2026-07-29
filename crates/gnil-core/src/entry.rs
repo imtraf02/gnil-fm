@@ -27,6 +27,7 @@ pub enum GitStatus {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FileMetadata {
     pub len: u64,
+    pub child_count: Option<u64>,
     pub modified_unix_ms: Option<i64>,
     pub mode: Option<u32>,
     pub readonly: bool,
@@ -156,7 +157,13 @@ impl SortSpec {
 }
 
 fn metadata_len(entry: &FileEntry) -> Option<u64> {
-    entry.metadata().map(|metadata| metadata.len)
+    entry.metadata().and_then(|metadata| {
+        if entry.kind == FileKind::Directory {
+            metadata.child_count
+        } else {
+            Some(metadata.len)
+        }
+    })
 }
 
 fn metadata_modified(entry: &FileEntry) -> Option<i64> {

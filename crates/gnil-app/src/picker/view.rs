@@ -204,17 +204,11 @@ impl Picker {
                         let is_directory = entry_is_directory(&entry);
                         let icon = file_icon_asset(&entry);
                         let name = entry.name.clone();
-                        let detail = if is_directory {
-                            "Folder".into()
-                        } else {
-                            entry
-                                .metadata()
-                                .map_or_else(|| "—".into(), |metadata| size_label(metadata.len))
-                        };
+                        let detail = picker_entry_detail(&entry, is_directory);
                         let row = div()
                             .id(("picker-entry", index))
                             .when(!disabled, FocusableControl::with_focus_ring)
-                            .h(px(34.0))
+                            .h_9()
                             .w_full()
                             .px_3()
                             .rounded_md()
@@ -303,7 +297,7 @@ impl Picker {
             .fold(
                 div()
                     .id("picker-filter-menu")
-                    .w(px(220.0))
+                    .w(px(240.0))
                     .p_1()
                     .rounded_lg()
                     .border_1()
@@ -360,7 +354,7 @@ impl Picker {
     }
 
     fn render_choices(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let mut row = div().flex().items_center().gap_2();
+        let mut row = div().flex().flex_wrap().items_center().gap_2();
         for index in 0..self.choices.len() {
             let choice = self.choices[index].clone();
             if choice.is_boolean() {
@@ -421,7 +415,7 @@ impl Picker {
             .fold(
                 div()
                     .id(("picker-choice-menu", index))
-                    .w(px(220.0))
+                    .w(px(240.0))
                     .p_1()
                     .rounded_lg()
                     .border_1()
@@ -542,9 +536,17 @@ impl Picker {
             PickerRequestKind::Save(_) => {
                 let name = self.name_input.as_ref()?.read(cx).text().to_owned();
                 valid_save_name(&name)
-                    .then(|| self.current_dir.join(self.save_name(cx).unwrap_or_else(|| OsString::from(name))))
+                    .then(|| {
+                        self.current_dir.join(
+                            self.save_name(cx)
+                                .unwrap_or_else(|| OsString::from(name)),
+                        )
+                    })
                     .filter(|path| path.exists())
-                    .map(|_| "A file with this name already exists; the app will decide whether to replace it.".into())
+                    .map(|_| {
+                        "A file with this name already exists; the app will decide whether to replace it."
+                            .into()
+                    })
             }
             PickerRequestKind::SaveMany(options) => {
                 let directory = self
@@ -562,4 +564,25 @@ impl Picker {
             PickerRequestKind::Open(_) => None,
         }
     }
+}
+
+fn picker_entry_detail(entry: &FileEntry, is_directory: bool) -> String {
+    if is_directory {
+        return entry
+            .metadata()
+            .and_then(|metadata| metadata.child_count)
+            .map_or_else(
+                || "Folder".into(),
+                |count| {
+                    if count == 1 {
+                        "1 item".to_owned()
+                    } else {
+                        format!("{count} items")
+                    }
+                },
+            );
+    }
+    entry
+        .metadata()
+        .map_or_else(|| "—".into(), |metadata| size_label(metadata.len))
 }

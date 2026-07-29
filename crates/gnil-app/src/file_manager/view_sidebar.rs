@@ -23,7 +23,7 @@ impl FileManager {
                     .pb_1()
                     .text_xs()
                     .text_color(rgb(text_muted()))
-                    .child("PLACES"),
+                    .child("QUICK ACCESS"),
             )
             .children(
                 self.places
@@ -131,6 +131,112 @@ impl FileManager {
                                 },
                             ))
                             .child(label.clone())
+                    }),
+            )
+            .child(sidebar_section_label("FAVORITES"))
+            .when(self.settings.favorites.is_empty(), |sidebar| {
+                sidebar.child(
+                    div()
+                        .mx_3()
+                        .py_1()
+                        .text_xs()
+                        .text_color(rgb(text_muted()))
+                        .child("Star a folder to add it"),
+                )
+            })
+            .children(
+                self.settings
+                    .favorites
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(index, path)| {
+                        let exists = self
+                            .favorite_availability
+                            .get(&path)
+                            .copied()
+                            .unwrap_or(false);
+                        let active =
+                            exists && self.tab.root != TabRoot::Trash && self.tab.path == path;
+                        let label = path.file_name().map_or_else(
+                            || path.display().to_string(),
+                            |name| name.to_string_lossy().into_owned(),
+                        );
+                        let click_path = path.clone();
+                        let drag_payload = FavoriteDragPayload {
+                            path: path.clone(),
+                            label: label.clone(),
+                        };
+                        div()
+                            .id(("favorite", stable_path_id(&path)))
+                            .with_focus_ring()
+                            .mx_2()
+                            .h(px(34.0))
+                            .px_3()
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .cursor_pointer()
+                            .text_sm()
+                            .text_color(rgb(if exists {
+                                theme_text()
+                            } else {
+                                text_muted()
+                            }))
+                            .when(active, |row| {
+                                row.bg(rgb(accent_background()))
+                                    .text_color(rgb(text_emphasized()))
+                            })
+                            .hover(|style| style.bg(rgb(border())))
+                            .can_drop(|value, _, _| {
+                                value.downcast_ref::<FavoriteDragPayload>().is_some()
+                            })
+                            .drag_over::<FavoriteDragPayload>(|style, _, _, _| {
+                                style
+                                    .bg(rgb(accent_background()))
+                                    .border_1()
+                                    .border_color(rgb(accent()))
+                            })
+                            .on_drop(cx.listener(
+                                move |this, payload: &FavoriteDragPayload, _, cx| {
+                                    this.reorder_favorite_path(&payload.path, index, cx);
+                                },
+                            ))
+                            .on_drag(
+                                drag_payload,
+                                |payload, cursor_offset, _, cx| {
+                                    cx.new(|_| FavoriteDragGhost {
+                                        label: payload.label.clone(),
+                                        cursor_offset,
+                                    })
+                                },
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_favorite(click_path.clone(), window, cx);
+                            }))
+                            .child(ui_icon(
+                                if exists {
+                                    "icons/folder-favorite.svg"
+                                } else {
+                                    "icons/status-warning.svg"
+                                },
+                                IconSize::Compact,
+                                if !exists {
+                                    IconTone::Warning
+                                } else if active {
+                                    IconTone::Accent
+                                } else {
+                                    IconTone::Muted
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(label),
+                            )
                     }),
             )
             .child(sidebar_section_label("DEVICES"))
@@ -319,12 +425,12 @@ impl FileManager {
                     )
                 },
             )
-            .child(sidebar_section_label("TRASH"))
             .child(
                 div()
                     .id("trash-place")
                     .with_focus_ring()
                     .mx_2()
+                    .mt_2()
                     .h(px(34.0))
                     .px_3()
                     .rounded_md()

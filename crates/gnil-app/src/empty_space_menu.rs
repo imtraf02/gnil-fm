@@ -12,7 +12,6 @@ pub(crate) enum EmptySpaceMenuCommand {
     SortField(SortField),
     SortDirection(SortDirection),
     ToggleHidden,
-    ToggleGitStatus,
     SelectAll,
     OpenTerminal,
     FolderProperties,
@@ -76,7 +75,6 @@ pub(crate) struct EmptySpaceMenuCapabilities {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct EmptySpaceViewState {
     pub(crate) show_hidden: bool,
-    pub(crate) git_status_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -296,18 +294,11 @@ fn submenu_entries(
                 context.sort.direction == SortDirection::Descending,
             ),
         ],
-        EmptySpaceSubmenu::ViewOptions => vec![
-            checked_action(
-                EmptySpaceMenuCommand::ToggleHidden,
-                "Show Hidden Files",
-                context.view.show_hidden,
-            ),
-            checked_action(
-                EmptySpaceMenuCommand::ToggleGitStatus,
-                "Show Git Status",
-                context.view.git_status_enabled,
-            ),
-        ],
+        EmptySpaceSubmenu::ViewOptions => vec![checked_action(
+            EmptySpaceMenuCommand::ToggleHidden,
+            "Show Hidden Files",
+            context.view.show_hidden,
+        )],
     }
 }
 
@@ -381,10 +372,7 @@ mod tests {
                 has_entries: true,
             },
             sort: SortSpec::default(),
-            view: EmptySpaceViewState {
-                show_hidden: false,
-                git_status_enabled: true,
-            },
+            view: EmptySpaceViewState { show_hidden: false },
         }
     }
 
@@ -418,7 +406,6 @@ mod tests {
         context.sort.field = SortField::Modified;
         context.sort.direction = SortDirection::Descending;
         context.view.show_hidden = true;
-        context.view.git_status_enabled = false;
         let mut menu = menu(context);
         menu.open_submenu(EmptySpaceSubmenu::SortBy);
         assert!(menu.submenu_entries.iter().any(|entry| matches!(
@@ -443,14 +430,6 @@ mod tests {
             EmptySpaceMenuEntry::Action {
                 command: EmptySpaceMenuCommand::ToggleHidden,
                 checked: true,
-                ..
-            }
-        )));
-        assert!(menu.submenu_entries.iter().any(|entry| matches!(
-            entry,
-            EmptySpaceMenuEntry::Action {
-                command: EmptySpaceMenuCommand::ToggleGitStatus,
-                checked: false,
                 ..
             }
         )));

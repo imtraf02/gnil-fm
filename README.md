@@ -6,13 +6,16 @@ background jobs, and bounded previews.
 
 ## Current MVP
 
-- GPUI Wayland shell with a virtualized file list, Places sidebar and adaptive preview panel
+- GPUI Wayland shell with a virtualized file list, Quick Access sidebar and adaptive preview panel
+- ordered folder Favorites with hover actions, context-menu toggles and missing-path recovery
 - keyboard navigation, history, hidden-file toggle and system opener
-- multi-select copy/cut/paste, Copy Path, Trash, permanent deletion confirmation and guarded undo
+- multi-select copy/cut/paste, native Wayland file drag-out, Copy Path, Trash, permanent deletion
+  confirmation and guarded undo
 - relative/absolute symlink creation, non-recursive chmod and cycle-safe bulk rename with live preview
 - non-blocking directory scans and preview generation
 - text/code highlighting, image preview and metadata fallback with hard safety limits
-- cancellable priority scheduler, fuzzy path search, filesystem watcher and Git status service
+- cancellable priority scheduler, recursive current-folder and Home search, metadata-rich directory
+  scans and filesystem watcher
 - safe copy/move/create/rename/trash/permanent-delete engine with conflict policies and session undo
 - staged, cancellable extraction for ZIP, TAR, 7z, RAR and common compressed streams
 - XDG configuration, Nix dev shell/package and Linux desktop metadata
@@ -42,6 +45,7 @@ render cost and coalesced pointer latency.
 | `Alt+←` / `Alt+→` | Back / forward |
 | `Alt+↑` | Parent folder |
 | `Ctrl+H` | Toggle hidden files |
+| `Ctrl+D` | Add or remove the selected folder from Favorites |
 | `F5` | Refresh |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / cut / paste |
 | `Ctrl+Shift+C` / `Ctrl+Alt+C` | Copy absolute / relative paths |
@@ -90,6 +94,13 @@ shared assets; GPU drivers still come from the host system.
 For a NixOS system installation:
 
 ```nix
+# flake.nix
+inputs.gnil-fm = {
+  url = "github:imtraf02/gnil-fm";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+
+# A NixOS module
 imports = [ inputs.gnil-fm.nixosModules.default ];
 programs.gnil-fm.enable = true;
 programs.gnil-fm.portal.enable = true; # opt in as Niri's FileChooser backend
@@ -111,12 +122,63 @@ programs.gnil-fm = {
 Manager option owns `xdg-desktop-portal/niri-portals.conf`; keep it disabled if that file is managed
 elsewhere. Log out and back in after changing portal selection so the session services restart.
 
+### Install in `nixos-minimal`
+
+The [`imtraf02/nixos-minimal`](https://github.com/imtraf02/nixos-minimal) configuration already
+declares the `gnil-fm` flake input and imports `inputs.gnil-fm.homeManagerModules.default` from
+`home/imtraf/default.nix`. Enable the portal beside the existing default-file-manager option:
+
+```nix
+programs.gnil-fm = {
+  enable = true;
+  defaultFileManager = true;
+  portal.enable = true;
+};
+```
+
+Then rebuild the repository's laptop target and start a fresh graphical session:
+
+```sh
+sudo nixos-rebuild switch --flake .#nixos-laptop
+```
+
+After logging out and back in, verify the selected backend and its activation metadata:
+
+```sh
+cat ~/.config/xdg-desktop-portal/niri-portals.conf
+systemctl --user status xdg-desktop-portal.service
+busctl --user introspect \
+  org.freedesktop.impl.portal.desktop.gnilfm \
+  /org/freedesktop/portal/desktop
+```
+
+The configuration file should select `gnilfm;gtk;` for
+`org.freedesktop.impl.portal.FileChooser`, and the introspection output should show `OpenFile`,
+`SaveFile`, `SaveFiles`, and version `4`. If activation fails, inspect both portal processes:
+
+```sh
+journalctl --user -b \
+  -u xdg-desktop-portal.service \
+  -u xdg-desktop-portal-gnilfm.service
+```
+
 The backend executable is `gnil-fm-portal` and owns
 `org.freedesktop.impl.portal.desktop.gnilfm`. It is activated by D-Bus and can serve independent,
 concurrent picker windows even when the main file-manager window is not running. Picker windows are
 read-only: no rename, delete, paste, filesystem drag-and-drop, Trash or terminal actions are
 registered. On Wayland, `wayland:<handle>` parents are attached with xdg-foreign v2; compositors
 without that protocol receive an independent toplevel as a safe fallback.
+
+The backend methods follow the implementation-side portal contract: the temporary
+`org.freedesktop.impl.portal.Request` object accepts `Close`, while the method returns the response
+code and results after interaction. The public `xdg-desktop-portal` service owns the caller-facing
+request object and emits `org.freedesktop.portal.Request.Response`; callers should use the public
+service rather than invoking this backend directly. Closing with Cancel, Escape, or the window close
+button resolves as user cancellation. Window creation failures resolve as an error instead of
+leaving the caller waiting.
+
+This package currently installs the main app and FileChooser backend as separate binaries and
+services. A separate `org.freedesktop.FileManager1` service is not provided yet.
 
 D-Bus and systemd activation metadata is wired automatically by the Nix package. The portable
 tarball includes a runnable `gnil-fm-portal` launcher, but selecting it as the session backend still

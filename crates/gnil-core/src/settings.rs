@@ -1,4 +1,4 @@
-use std::{fs, io, path::PathBuf};
+use std::{collections::HashSet, fs, io, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -38,6 +38,7 @@ pub struct AppSettings {
     pub reduced_motion: bool,
     pub worker_threads: usize,
     pub memory_cache_mib: usize,
+    pub favorites: Vec<PathBuf>,
 }
 
 impl Default for AppSettings {
@@ -56,6 +57,7 @@ impl Default for AppSettings {
             reduced_motion: false,
             worker_threads: 4,
             memory_cache_mib: 128,
+            favorites: Vec::new(),
         }
     }
 }
@@ -69,6 +71,8 @@ impl AppSettings {
         if !matches!(self.memory_cache_mib, 64 | 128 | 256 | 512) {
             self.memory_cache_mib = 128;
         }
+        let mut unique = HashSet::new();
+        self.favorites.retain(|path| unique.insert(path.clone()));
     }
 }
 
@@ -160,6 +164,7 @@ mod tests {
         };
         let settings = AppSettings {
             show_hidden: true,
+            favorites: vec![PathBuf::from("/tmp/project"), PathBuf::from("/tmp/archive")],
             ..AppSettings::default()
         };
         paths.save_settings(&settings).unwrap();
@@ -186,5 +191,22 @@ mod tests {
         assert_eq!(settings.schema_version, 2);
         assert_eq!(settings.worker_threads, 4);
         assert_eq!(settings.memory_cache_mib, 128);
+    }
+
+    #[test]
+    fn favorites_keep_user_order_and_drop_duplicates() {
+        let mut settings = AppSettings {
+            favorites: vec![
+                PathBuf::from("/z"),
+                PathBuf::from("/a"),
+                PathBuf::from("/z"),
+            ],
+            ..AppSettings::default()
+        };
+        settings.normalize();
+        assert_eq!(
+            settings.favorites,
+            [PathBuf::from("/z"), PathBuf::from("/a")]
+        );
     }
 }

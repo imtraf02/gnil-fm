@@ -27,7 +27,7 @@ UI changes must follow `.agents/skills/gnil-fm-ui-design/SKILL.md`. UI view modu
 1. Navigation advances a generation counter, cancels the previous request and submits a directory
    scan.
 2. The scan emits a discovered snapshot containing names and kinds, then a complete snapshot with
-   metadata and Git status. Stale generations are discarded.
+   file sizes and direct child counts for folders. Stale generations are discarded.
 3. Selection launches a bounded, cancellable preview request. Syntax resources are reused and
    fingerprinted results may come from the bounded memory cache.
 4. Mutations run away from the render thread and return an optional undo record.
@@ -69,6 +69,6 @@ opens a separate GPUI picker, and keeps the method call pending until the picker
 The D-Bus executor communicates with the GPUI event loop through channels, so simultaneous callers
 never share navigation, selection, filter, choice or filename state. Closing a window, pressing
 Escape, clicking Cancel or invoking `Request.Close` all converge on the same exactly-once
-completion guard. GPUI is vendored at version 0.2.2 solely to add xdg-foreign v2 external parenting
-and an opt-in session-service keep-alive; normal `gnil-fm` windows retain upstream lifecycle
-behavior.
+completion guard. GPUI is vendored at version 0.2.2 to add xdg-foreign v2 external parenting,
+native Wayland `text/uri-list` drag sources and an opt-in session-service keep-alive; normal
+`gnil-fm` windows otherwise retain upstream lifecycle behavior.

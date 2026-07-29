@@ -3,26 +3,30 @@ enum FileManagerSurfaceKind {
     Sidebar,
     Header,
     FileList,
+    RubberBand,
     Preview,
     Status,
 }
 
 impl FileManagerSurfaceKind {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Sidebar,
         Self::Header,
         Self::FileList,
+        Self::RubberBand,
         Self::Preview,
         Self::Status,
     ];
+    const COUNT: usize = Self::ALL.len();
 
     const fn index(self) -> usize {
         match self {
             Self::Sidebar => 0,
             Self::Header => 1,
             Self::FileList => 2,
-            Self::Preview => 3,
-            Self::Status => 4,
+            Self::RubberBand => 3,
+            Self::Preview => 4,
+            Self::Status => 5,
         }
     }
 
@@ -31,6 +35,7 @@ impl FileManagerSurfaceKind {
             Self::Sidebar => "sidebar",
             Self::Header => "header",
             Self::FileList => "list",
+            Self::RubberBand => "rubber",
             Self::Preview => "preview",
             Self::Status => "status",
         }
@@ -71,6 +76,7 @@ impl Render for FileManagerSurface {
                         let list_focused = owner.focus_handle.is_focused(window);
                         owner.render_file_list(list_focused, owner_cx)
                     }
+                    FileManagerSurfaceKind::RubberBand => owner.render_rubber_band(),
                     FileManagerSurfaceKind::Preview => owner.render_preview(),
                     FileManagerSurfaceKind::Status => owner.render_status(owner_cx),
                 };
@@ -88,6 +94,7 @@ struct FileManagerSurfaces {
     sidebar: Entity<FileManagerSurface>,
     header: Entity<FileManagerSurface>,
     file_list: Entity<FileManagerSurface>,
+    rubber_band: Entity<FileManagerSurface>,
     preview: Entity<FileManagerSurface>,
     status: Entity<FileManagerSurface>,
 }
@@ -111,6 +118,7 @@ impl FileManagerSurfaces {
             sidebar: surface(FileManagerSurfaceKind::Sidebar, cx),
             header: surface(FileManagerSurfaceKind::Header, cx),
             file_list: surface(FileManagerSurfaceKind::FileList, cx),
+            rubber_band: surface(FileManagerSurfaceKind::RubberBand, cx),
             preview: surface(FileManagerSurfaceKind::Preview, cx),
             status: surface(FileManagerSurfaceKind::Status, cx),
         }
@@ -121,6 +129,7 @@ impl FileManagerSurfaces {
             &self.sidebar,
             &self.header,
             &self.file_list,
+            &self.rubber_band,
             &self.preview,
             &self.status,
         ] {
@@ -130,6 +139,10 @@ impl FileManagerSurfaces {
 
     fn invalidate_file_list(&self, cx: &mut Context<FileManager>) {
         self.file_list.update(cx, |_, cx| cx.notify());
+    }
+
+    fn invalidate_rubber_band(&self, cx: &mut Context<FileManager>) {
+        self.rubber_band.update(cx, |_, cx| cx.notify());
     }
 
     fn sidebar(&self) -> AnyView {
@@ -157,6 +170,16 @@ impl FileManagerSurfaces {
                 .h_full()
                 .min_w_0()
                 .min_h_0(),
+        )
+    }
+
+    fn rubber_band(&self) -> AnyView {
+        AnyView::from(self.rubber_band.clone()).cached(
+            StyleRefinement::default()
+                .absolute()
+                .inset_0()
+                .w_full()
+                .h_full(),
         )
     }
 

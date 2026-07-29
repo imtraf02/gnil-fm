@@ -57,6 +57,8 @@ impl FileManager {
         let viewport_right = f32::from(viewport.right());
         let mut should_schedule = false;
         let mut changed = false;
+        let mut overlay_changed = false;
+        let mut list_changed = false;
         if let PointerInteraction::RubberBand(state) = &mut self.pointer_interaction {
             let current_content_y = f32::from(position.y - viewport.top()) - offset_y;
             let crossed_threshold =
@@ -75,10 +77,15 @@ impl FileManager {
                     && *span.end() >= rendered_range.start
                     && *span.start() < rendered_range.end
             });
-            changed = state.current != position
+            let position_changed = state.current != position;
+            let threshold_changed = state.crossed_threshold != crossed_threshold;
+            let hit_span_changed = state.hit_span != hit_span;
+            changed = position_changed
                 || state.current_content_y.to_bits() != current_content_y.to_bits()
-                || state.crossed_threshold != crossed_threshold
-                || state.hit_span != hit_span;
+                || threshold_changed
+                || hit_span_changed;
+            overlay_changed = crossed_threshold && (position_changed || threshold_changed);
+            list_changed = threshold_changed || hit_span_changed;
             state.current = position;
             state.current_content_y = current_content_y;
             state.crossed_threshold = crossed_threshold;
@@ -91,7 +98,10 @@ impl FileManager {
         if should_schedule {
             self.schedule_rubber_autoscroll(cx);
         }
-        if changed {
+        if overlay_changed {
+            self.surfaces.invalidate_rubber_band(cx);
+        }
+        if list_changed {
             self.surfaces.invalidate_file_list(cx);
         }
         changed

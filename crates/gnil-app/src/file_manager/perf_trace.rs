@@ -25,7 +25,7 @@ struct PerfTrace {
     enabled: bool,
     report_started: Instant,
     root: RenderPerfBucket,
-    surfaces: [RenderPerfBucket; 5],
+    surfaces: [RenderPerfBucket; FileManagerSurfaceKind::COUNT],
     pointer_received: u64,
     pointer_queued: u64,
     pointer_applied: u64,
@@ -41,7 +41,7 @@ impl PerfTrace {
             enabled: env::var_os("GNIL_PERF_TRACE").is_some(),
             report_started: Instant::now(),
             root: RenderPerfBucket::default(),
-            surfaces: [RenderPerfBucket::default(); 5],
+            surfaces: [RenderPerfBucket::default(); FileManagerSurfaceKind::COUNT],
             pointer_received: 0,
             pointer_queued: 0,
             pointer_applied: 0,
@@ -144,7 +144,7 @@ impl PerfTrace {
     fn reset_interval(&mut self) {
         self.report_started = Instant::now();
         self.root = RenderPerfBucket::default();
-        self.surfaces = [RenderPerfBucket::default(); 5];
+        self.surfaces = [RenderPerfBucket::default(); FileManagerSurfaceKind::COUNT];
         self.pointer_received = 0;
         self.pointer_queued = 0;
         self.pointer_applied = 0;

@@ -208,6 +208,13 @@ fn entry_from_path(path: &Path) -> Option<FileEntry> {
             .is_some_and(|name| name.to_string_lossy().starts_with('.')),
         metadata: EntryMetadata::Ready(FileMetadata {
             len: metadata.len(),
+            child_count: (kind == FileKind::Directory)
+                .then(|| {
+                    fs::read_dir(path)
+                        .ok()
+                        .and_then(|children| u64::try_from(children.count()).ok())
+                })
+                .flatten(),
             modified_unix_ms: None,
             mode,
             readonly: metadata.permissions().readonly(),

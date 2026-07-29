@@ -5,7 +5,7 @@ use gpui::{
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
-    fill, point, prelude::*, px, relative, rgb, rgba, size,
+    fill, point, prelude::*, px, relative, rgb, rgba, size, svg,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -41,6 +41,15 @@ pub struct TextInput {
     is_selecting: bool,
     key_context: &'static str,
     invalid: bool,
+    leading_icon: Option<&'static str>,
+    trailing_space: TrailingSpace,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum TrailingSpace {
+    #[default]
+    None,
+    Action,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -70,12 +79,26 @@ impl TextInput {
             is_selecting: false,
             key_context: "TextInput",
             invalid: false,
+            leading_icon: None,
+            trailing_space: TrailingSpace::None,
         }
     }
 
     #[must_use]
     pub fn with_key_context(mut self, key_context: &'static str) -> Self {
         self.key_context = key_context;
+        self
+    }
+
+    #[must_use]
+    pub fn with_leading_icon(mut self, path: &'static str) -> Self {
+        self.leading_icon = Some(path);
+        self
+    }
+
+    #[must_use]
+    pub fn with_trailing_action_space(mut self) -> Self {
+        self.trailing_space = TrailingSpace::Action;
         self
     }
 
@@ -169,10 +192,9 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.content[self.selected_range.clone()].to_owned(),
-            ));
+        let selected = self.valid_range(self.selected_range.clone());
+        if !selected.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(self.content[selected].to_owned()));
         }
     }
 
@@ -210,12 +232,14 @@ impl TextInput {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = self.valid_offset(offset);
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         cx.notify();
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = self.valid_offset(offset);
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {
@@ -229,11 +253,12 @@ impl TextInput {
     }
 
     fn cursor_offset(&self) -> usize {
-        if self.selection_reversed {
+        let offset = if self.selection_reversed {
             self.selected_range.start
         } else {
             self.selected_range.end
-        }
+        };
+        self.valid_offset(offset)
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
@@ -261,7 +286,21 @@ impl TextInput {
         if position.x >= bounds.right() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        self.valid_offset(line.closest_index_for_x(position.x - bounds.left()))
+    }
+
+    fn valid_offset(&self, offset: usize) -> usize {
+        let mut offset = offset.min(self.content.len());
+        while !self.content.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        offset
+    }
+
+    fn valid_range(&self, range: Range<usize>) -> Range<usize> {
+        let start = self.valid_offset(range.start);
+        let end = self.valid_offset(range.end);
+        start.min(end)..start.max(end)
     }
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
@@ -278,10 +317,12 @@ impl TextInput {
     }
 
     fn offset_to_utf16(&self, offset: usize) -> usize {
+        let offset = self.valid_offset(offset);
         self.content[..offset].encode_utf16().count()
     }
 
     fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        let range = self.valid_range(range.clone());
         self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
     }
 
@@ -337,6 +378,7 @@ impl EntityInputHandler for TextInput {
             .map(|range| self.range_from_utf16(range))
             .or(self.marked_range.clone())
             .unwrap_or_else(|| self.selected_range.clone());
+        let range = self.valid_range(range);
         self.content = format!(
             "{}{}{}",
             &self.content[..range.start],
@@ -367,7 +409,10 @@ impl EntityInputHandler for TextInput {
         if let Some(selected) = selected {
             let marked_start = self.marked_range.as_ref().map_or(0, |range| range.start);
             let selected = self.range_from_utf16(&selected);
-            self.selected_range = marked_start + selected.start..marked_start + selected.end;
+            self.selected_range = self.valid_range(
+                marked_start.saturating_add(selected.start)
+                    ..marked_start.saturating_add(selected.end),
+            );
         }
     }
 
@@ -595,8 +640,13 @@ impl Render for TextInput {
             .h(px(34.))
             .w_full()
             .px_2()
+            .when(
+                self.trailing_space == TrailingSpace::Action,
+                gpui::Styled::pr_8,
+            )
             .flex()
             .items_center()
+            .gap_2()
             .rounded_md()
             .border_1()
             .border_color(rgb(if self.invalid {
@@ -607,7 +657,21 @@ impl Render for TextInput {
             .bg(rgb(theme_runtime::surface_elevated()))
             .text_size(px(13.))
             .line_height(px(18.))
-            .child(TextElement { input: cx.entity() })
+            .when_some(self.leading_icon, |field, icon| {
+                field.child(
+                    svg()
+                        .path(icon)
+                        .size(px(16.0))
+                        .flex_none()
+                        .text_color(rgb(theme_runtime::text_muted())),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(TextElement { input: cx.entity() }),
+            )
     }
 }
 
@@ -618,7 +682,7 @@ impl Focusable for TextInput {
 }
 
 pub fn bind_keys(cx: &mut App) {
-    for context in ["TextInput", "PathInput"] {
+    for context in ["TextInput", "PathInput", "SearchInput"] {
         cx.bind_keys([
             KeyBinding::new("backspace", Backspace, Some(context)),
             KeyBinding::new("delete", Delete, Some(context)),
@@ -634,4 +698,36 @@ pub fn bind_keys(cx: &mut App) {
         ]);
     }
     cx.bind_keys([KeyBinding::new("ctrl-v", Paste, Some("TextInput"))]);
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Modifiers, MouseButton, TestAppContext, point, px};
+
+    use super::TextInput;
+
+    #[gpui::test]
+    fn typing_after_clicking_an_empty_placeholder_uses_the_real_content_range(
+        cx: &mut TestAppContext,
+    ) {
+        let (input, cx) =
+            cx.add_window_view(|_, cx| TextInput::new("Search current folder", "", cx));
+        let bounds = cx.read(|cx| {
+            input
+                .read(cx)
+                .last_bounds
+                .expect("input text should be laid out")
+        });
+        let position = point(
+            bounds.right() - px(1.0),
+            bounds.top() + bounds.size.height / 2.0,
+        );
+
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+
+        assert_eq!(cx.read(|cx| input.read(cx).selected_range.clone()), 0..0);
+        cx.simulate_input("a");
+        assert_eq!(cx.read(|cx| input.read(cx).text().to_owned()), "a");
+    }
 }

@@ -4,6 +4,10 @@ use std::{
     os::fd::{AsRawFd, BorrowedFd},
     path::PathBuf,
     rc::{Rc, Weak},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -74,11 +78,12 @@ use super::{
 use crate::platform::{PlatformWindow, blade::BladeContext};
 use crate::{
     AnyWindowHandle, Bounds, Capslock, CursorStyle, DOUBLE_CLICK_INTERVAL, DevicePixels, DisplayId,
-    FileDropEvent, ForegroundExecutor, KeyDownEvent, KeyUpEvent, Keystroke, LinuxCommon,
-    LinuxKeyboardLayout, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, PlatformDisplay,
-    PlatformInput, PlatformKeyboardLayout, Point, SCROLL_LINES, ScrollDelta, ScrollWheelEvent,
-    Size, TouchPhase, WindowParams, point, px, size,
+    ExternalFileDragMode, ExternalPaths, FileDragEndedEvent, FileDropEvent, ForegroundExecutor,
+    KeyDownEvent, KeyUpEvent, Keystroke, LinuxCommon, LinuxKeyboardLayout, Modifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, NavigationDirection, Pixels, PlatformDisplay, PlatformInput,
+    PlatformKeyboardLayout, Point, SCROLL_LINES, ScrollDelta, ScrollWheelEvent, Size, TouchPhase,
+    WindowParams, point, px, size,
 };
 use crate::{
     SharedString,
@@ -248,6 +253,12 @@ pub struct DragState {
     position: Point<Pixels>,
 }
 
+struct OutboundFileDrag {
+    origin_surface: ObjectId,
+    uri_list: Arc<[u8]>,
+    ended: AtomicBool,
+}
+
 pub struct ClickState {
     last_mouse_button: Option<MouseButton>,
     last_click: Instant,
@@ -285,6 +296,46 @@ impl WaylandClientStatePtr {
 
     pub fn get_serial(&self, kind: SerialKind) -> u32 {
         self.0.upgrade().unwrap().borrow().serial_tracker.get(kind)
+    }
+
+    pub fn start_external_file_drag(
+        &self,
+        origin_surface: wl_surface::WlSurface,
+        paths: ExternalPaths,
+        mode: ExternalFileDragMode,
+    ) -> bool {
+        let Some(uri_list) = paths.to_uri_list() else {
+            return false;
+        };
+        let client = self.get_client();
+        let state = client.borrow();
+        let (Some(data_device_manager), Some(data_device)) = (
+            state.globals.data_device_manager.as_ref(),
+            state.data_device.as_ref(),
+        ) else {
+            return false;
+        };
+        let source = data_device_manager.create_data_source(
+            &state.globals.qh,
+            OutboundFileDrag {
+                origin_surface: origin_surface.id(),
+                uri_list: uri_list.into(),
+                ended: AtomicBool::new(false),
+            },
+        );
+        source.offer(FILE_LIST_MIME_TYPE.to_owned());
+        source.offer(INTERNAL_FILE_DRAG_MIME_TYPE.to_owned());
+        source.set_actions(match mode {
+            ExternalFileDragMode::CopyOnly => DndAction::Copy,
+            ExternalFileDragMode::CopyOrMove => DndAction::Copy | DndAction::Move,
+        });
+        data_device.start_drag(
+            Some(&source),
+            &origin_surface,
+            None,
+            state.serial_tracker.get(SerialKind::MousePress),
+        );
+        true
     }
 
     pub fn set_pending_activation(&self, window: ObjectId) {
@@ -417,6 +468,7 @@ impl Drop for WaylandClient {
 }
 
 const WL_DATA_DEVICE_MANAGER_VERSION: u32 = 3;
+const INTERNAL_FILE_DRAG_MIME_TYPE: &str = "application/x-gpui-local-file-drag";
 
 fn wl_seat_version(version: u32) -> u32 {
     // We rely on the wl_pointer.frame event
@@ -1911,8 +1963,22 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                         return;
                     };
 
-                    const ACTIONS: DndAction = DndAction::Copy;
-                    data_offer.set_actions(ACTIONS, ACTIONS);
+                    let from_this_client = state
+                        .data_offers
+                        .iter()
+                        .find(|offer| offer.inner.id() == data_offer.id())
+                        .is_some_and(|offer| offer.has_mime_type(INTERNAL_FILE_DRAG_MIME_TYPE));
+                    let actions = if from_this_client {
+                        DndAction::Copy | DndAction::Move
+                    } else {
+                        DndAction::Copy
+                    };
+                    let preferred_action = if from_this_client {
+                        DndAction::Move
+                    } else {
+                        DndAction::Copy
+                    };
+                    data_offer.set_actions(actions, preferred_action);
 
                     let pipe = Pipe::new().unwrap();
                     data_offer.receive(FILE_LIST_MIME_TYPE.to_string(), unsafe {
@@ -2071,6 +2137,40 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for WaylandClientStatePtr {
             }
             wl_data_source::Event::Cancelled => {
                 data_source.destroy();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_data_source::WlDataSource, OutboundFileDrag> for WaylandClientStatePtr {
+    fn event(
+        this: &mut Self,
+        data_source: &wl_data_source::WlDataSource,
+        event: wl_data_source::Event,
+        drag: &OutboundFileDrag,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_source::Event::Send { mime_type, fd } => {
+                let bytes = if mime_type == FILE_LIST_MIME_TYPE {
+                    drag.uri_list.to_vec()
+                } else {
+                    Vec::new()
+                };
+                this.get_client().borrow().clipboard.send_bytes(fd, bytes);
+            }
+            wl_data_source::Event::Cancelled | wl_data_source::Event::DndFinished => {
+                if drag.ended.swap(true, Ordering::Relaxed) {
+                    return;
+                }
+                data_source.destroy();
+                let client = this.get_client();
+                let origin_window = client.borrow().windows.get(&drag.origin_surface).cloned();
+                if let Some(origin_window) = origin_window {
+                    origin_window.handle_input(PlatformInput::FileDragEnded(FileDragEndedEvent));
+                }
             }
             _ => {}
         }

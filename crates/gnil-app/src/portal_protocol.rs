@@ -520,6 +520,40 @@ mod tests {
     }
 
     #[test]
+    fn parses_save_prefill_and_folder_options() {
+        let mut options = PortalOptions::new();
+        options.insert("current_name".into(), value("report.txt".to_owned()));
+        options.insert("current_folder".into(), value(b"/tmp/reports\0".to_vec()));
+        options.insert("current_file".into(), value(b"/tmp/old.txt\0".to_vec()));
+        let parsed = SaveFileOptions::parse(&options).unwrap();
+
+        assert_eq!(parsed.current_name.as_deref(), Some("report.txt"));
+        assert_eq!(
+            parsed.common.current_folder.as_deref(),
+            Some(Path::new("/tmp/reports"))
+        );
+        assert_eq!(
+            parsed.current_file.as_deref(),
+            Some(Path::new("/tmp/old.txt"))
+        );
+    }
+
+    #[test]
+    fn open_directory_and_multiple_modes_are_independent() {
+        let mut directory = PortalOptions::new();
+        directory.insert("directory".into(), value(true));
+        let mut multiple = PortalOptions::new();
+        multiple.insert("multiple".into(), value(true));
+
+        let directory = OpenFileOptions::parse(&directory).unwrap();
+        let multiple = OpenFileOptions::parse(&multiple).unwrap();
+        assert!(directory.directory);
+        assert!(!directory.multiple);
+        assert!(multiple.multiple);
+        assert!(!multiple.directory);
+    }
+
+    #[test]
     fn decodes_non_utf8_paths_and_rejects_unsafe_names() {
         let mut bytes = b"/tmp/non-utf8-".to_vec();
         bytes.extend([0xff, 0]);
@@ -561,5 +595,18 @@ mod tests {
         });
         assert_eq!(response.code, 2);
         assert!(response.uris.is_empty());
+    }
+
+    #[test]
+    fn validates_save_names_and_parent_handles() {
+        for valid in ["file.txt", ".hidden", "name with spaces"] {
+            assert!(valid_save_name(valid));
+        }
+        for invalid in ["", ".", "..", "folder/file", "nul\0name"] {
+            assert!(!valid_save_name(invalid));
+        }
+        assert_eq!(parent_handle("wayland:token"), Some("token"));
+        assert_eq!(parent_handle("wayland:"), None);
+        assert_eq!(parent_handle("wayland:bad\nhandle"), None);
     }
 }

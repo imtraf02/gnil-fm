@@ -5,14 +5,15 @@ use crate::{
     AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
     Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
     DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
-    FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
-    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
-    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent,
-    MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, PromptButton, PromptLevel, Quad,
-    Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
-    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow,
-    SharedString, Size, StrikethroughStyle, Style, SubscriberSet, Subscription, SystemWindowTab,
+    ExternalFileDragMode, ExternalPaths, FileDropEvent, FontId, Global, GlobalElementId, GlyphId,
+    GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
+    Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
+    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PolychromeSprite, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage,
+    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
+    StrikethroughStyle, Style, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextStyle, TextStyleRefinement,
     TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
     WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
@@ -1754,6 +1755,17 @@ impl Window {
     /// Events may not be received during a move operation.
     pub fn start_window_move(&self) {
         self.platform_window.start_window_move()
+    }
+
+    /// Starts a native file drag using the platform's drag-and-drop protocol.
+    ///
+    /// Returns `false` when the platform cannot start the drag.
+    pub fn start_external_file_drag(
+        &self,
+        paths: ExternalPaths,
+        mode: ExternalFileDragMode,
+    ) -> bool {
+        self.platform_window.start_external_file_drag(paths, mode)
     }
 
     /// When using client side decorations, set this to the width of the invisible decorations (Wayland and X11)
@@ -3635,7 +3647,7 @@ impl Window {
                     PlatformInput::MouseMove(MouseMoveEvent {
                         position,
                         pressed_button: Some(MouseButton::Left),
-                        modifiers: Modifiers::default(),
+                        modifiers: self.modifiers,
                     })
                 }
                 FileDropEvent::Pending { position } => {
@@ -3643,7 +3655,7 @@ impl Window {
                     PlatformInput::MouseMove(MouseMoveEvent {
                         position,
                         pressed_button: Some(MouseButton::Left),
-                        modifiers: Modifiers::default(),
+                        modifiers: self.modifiers,
                     })
                 }
                 FileDropEvent::Submit { position } => {
@@ -3652,7 +3664,7 @@ impl Window {
                     PlatformInput::MouseUp(MouseUpEvent {
                         button: MouseButton::Left,
                         position,
-                        modifiers: Modifiers::default(),
+                        modifiers: self.modifiers,
                         click_count: 1,
                     })
                 }
@@ -3661,6 +3673,19 @@ impl Window {
                     PlatformInput::FileDrop(FileDropEvent::Exited)
                 }
             },
+            PlatformInput::FileDragEnded(_) => {
+                if cx.active_drag.take().is_some() {
+                    self.refresh();
+                    PlatformInput::MouseUp(MouseUpEvent {
+                        button: MouseButton::Left,
+                        position: self.mouse_position,
+                        modifiers: self.modifiers,
+                        click_count: 1,
+                    })
+                } else {
+                    event
+                }
+            }
             PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_) => event,
         };
 

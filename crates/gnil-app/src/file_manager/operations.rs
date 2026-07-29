@@ -110,11 +110,6 @@ impl FileManager {
         }
     }
 
-    fn toggle_git_status(&mut self, cx: &mut Context<Self>) {
-        self.git_status_enabled = !self.git_status_enabled;
-        self.load_directory(cx);
-    }
-
     fn sort_from_header(&mut self, field: SortField, cx: &mut Context<Self>) {
         if self.tab.sort.field == field {
             self.tab.sort.direction = match self.tab.sort.direction {

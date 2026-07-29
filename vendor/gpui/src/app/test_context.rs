@@ -1,11 +1,11 @@
 use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AsyncApp, AvailableSpace,
     BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, DrawPhase, Drawable,
-    Element, Empty, EventEmitter, ForegroundExecutor, Global, InputEvent, Keystroke, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Platform, Point, Render, Result, Size, Task, TestDispatcher, TestPlatform,
-    TestScreenCaptureSource, TestWindow, TextSystem, VisualContext, Window, WindowBounds,
-    WindowHandle, WindowOptions,
+    Element, Empty, EventEmitter, ExternalFileDragMode, ExternalPaths, ForegroundExecutor, Global,
+    InputEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Platform, Point, Render, Result, Size, Task,
+    TestDispatcher, TestPlatform, TestScreenCaptureSource, TestWindow, TextSystem, VisualContext,
+    Window, WindowBounds, WindowHandle, WindowOptions,
 };
 use anyhow::{anyhow, bail};
 use futures::{Stream, StreamExt, channel::oneshot};
@@ -708,6 +708,16 @@ impl VisualTestContext {
     /// Read the title off the window (set by `Window#set_window_title`)
     pub fn window_title(&mut self) -> Option<String> {
         self.cx.test_window(self.window).0.lock().title.clone()
+    }
+
+    /// Returns and clears the latest native file drag requested by the window.
+    pub fn take_external_file_drag(&mut self) -> Option<(ExternalPaths, ExternalFileDragMode)> {
+        self.cx
+            .test_window(self.window)
+            .0
+            .lock()
+            .external_file_drag
+            .take()
     }
 
     /// Simulate a sequence of keystrokes `cx.simulate_keystrokes("cmd-p escape")`

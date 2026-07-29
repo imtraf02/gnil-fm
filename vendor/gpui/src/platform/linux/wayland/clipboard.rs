@@ -74,7 +74,7 @@ impl<T: ReceiveData> DataOffer<T> {
         self.mime_types.push(mime_type)
     }
 
-    fn has_mime_type(&self, mime_type: &str) -> bool {
+    pub(crate) fn has_mime_type(&self, mime_type: &str) -> bool {
         self.mime_types.iter().any(|t| t == mime_type)
     }
 
@@ -181,7 +181,7 @@ impl Clipboard {
 
     pub fn send(&self, _mime_type: String, fd: OwnedFd) {
         if let Some(text) = self.contents.as_ref().and_then(|contents| contents.text()) {
-            self.send_internal(fd, text.as_bytes().to_owned());
+            self.send_bytes(fd, text.as_bytes().to_owned());
         }
     }
 
@@ -191,7 +191,7 @@ impl Clipboard {
             .as_ref()
             .and_then(|contents| contents.text())
         {
-            self.send_internal(fd, text.as_bytes().to_owned());
+            self.send_bytes(fd, text.as_bytes().to_owned());
         }
     }
 
@@ -231,7 +231,7 @@ impl Clipboard {
         Some(item)
     }
 
-    fn send_internal(&self, fd: OwnedFd, bytes: Vec<u8>) {
+    pub(crate) fn send_bytes(&self, fd: OwnedFd, bytes: Vec<u8>) {
         let mut written = 0;
         self.loop_handle
             .insert_source(

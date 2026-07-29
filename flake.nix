@@ -128,12 +128,12 @@
                 $out/share/metainfo/io.github.gnil_fm.Gnil.metainfo.xml
               install -Dm644 packaging/gnilfm.portal \
                 $out/share/xdg-desktop-portal/portals/gnilfm.portal
-              install -d $out/share/dbus-1/services $out/lib/systemd/user
+              install -d $out/share/dbus-1/services $out/share/systemd/user
               substitute packaging/org.freedesktop.impl.portal.desktop.gnilfm.service.in \
                 $out/share/dbus-1/services/org.freedesktop.impl.portal.desktop.gnilfm.service \
                 --replace-fail '@portal_executable@' "$out/bin/gnil-fm-portal"
               substitute packaging/xdg-desktop-portal-gnilfm.service.in \
-                $out/lib/systemd/user/xdg-desktop-portal-gnilfm.service \
+                $out/share/systemd/user/xdg-desktop-portal-gnilfm.service \
                 --replace-fail '@portal_executable@' "$out/bin/gnil-fm-portal"
               install -Dm644 assets/brand/gnil-fm.svg \
                 $out/share/icons/hicolor/scalable/apps/gnil-fm.svg
@@ -201,6 +201,19 @@
           } ''
             bash ${./scripts/check-source-size.sh} ${./.}
             touch $out
+          '';
+          portal-package = pkgs.runCommand "gnil-fm-portal-package-check" { } ''
+            package=${self.packages.${system}.default}
+            test -x "$package/bin/gnil-fm"
+            test -x "$package/bin/gnil-fm-portal"
+            test -f "$package/share/xdg-desktop-portal/portals/gnilfm.portal"
+            test -f \
+              "$package/share/dbus-1/services/org.freedesktop.impl.portal.desktop.gnilfm.service"
+            test -f \
+              "$package/share/systemd/user/xdg-desktop-portal-gnilfm.service"
+            test ! -e \
+              "$package/lib/systemd/user/xdg-desktop-portal-gnilfm.service"
+            touch "$out"
           '';
         });
 
