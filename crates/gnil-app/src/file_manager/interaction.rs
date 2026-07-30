@@ -466,11 +466,11 @@ impl FileManager {
                             .update(cx, |input, cx| input.set_invalid(false, cx));
                         match target {
                             PathTarget::Directory(path) => {
-                                this.pending_reveal = None;
+                                this.pending_reveal.clear();
                                 this.navigate_path(path);
                             }
                             PathTarget::File { path, parent } => {
-                                this.pending_reveal = Some(path);
+                                this.pending_reveal = vec![path];
                                 this.navigate_path(parent);
                             }
                         }
@@ -799,7 +799,7 @@ impl FileManager {
             .copied()
             .unwrap_or(true)
         {
-            self.pending_reveal = None;
+            self.pending_reveal.clear();
             self.tab.navigate(path);
             self.load_directory(cx);
             return;

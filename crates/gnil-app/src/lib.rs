@@ -7,6 +7,7 @@ mod ui;
 
 pub mod assets;
 pub mod file_manager;
+pub mod file_manager_service;
 pub mod path_input;
 pub mod picker;
 pub mod portal_protocol;

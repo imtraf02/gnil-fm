@@ -35,14 +35,20 @@
               description = "gnil-fm package to install.";
             };
           };
-          config = lib.mkIf cfg.enable {
-            environment.systemPackages = [ cfg.package ];
-            xdg.portal = lib.mkIf cfg.portal.enable {
-              enable = true;
-              extraPortals = [ cfg.package ];
-              config.niri."org.freedesktop.impl.portal.FileChooser" = [ "gnilfm" "gtk" ];
-            };
-          };
+          config = lib.mkIf cfg.enable (lib.mkMerge [
+            {
+              environment.systemPackages = [ cfg.package ];
+            }
+            (lib.mkIf cfg.portal.enable {
+              programs.niri.useNautilus = lib.mkDefault false;
+              xdg.portal = {
+                enable = true;
+                extraPortals = [ cfg.package ];
+                config.niri."org.freedesktop.impl.portal.FileChooser" =
+                  lib.mkForce [ "gnilfm" "gtk" ];
+              };
+            })
+          ]);
         };
       homeManagerModule = { config, lib, pkgs, ... }:
         let cfg = config.programs.gnil-fm; in {
@@ -134,6 +140,12 @@
               substitute packaging/xdg-desktop-portal-gnilfm.service.in \
                 $out/share/systemd/user/xdg-desktop-portal-gnilfm.service \
                 --replace-fail '@portal_executable@' "$out/bin/gnil-fm-portal"
+              substitute packaging/org.freedesktop.FileManager1.service.in \
+                $out/share/dbus-1/services/org.freedesktop.FileManager1.service \
+                --replace-fail '@file_manager_executable@' "$out/bin/gnil-fm"
+              substitute packaging/gnil-fm-file-manager.service.in \
+                $out/share/systemd/user/gnil-fm-file-manager.service \
+                --replace-fail '@file_manager_executable@' "$out/bin/gnil-fm"
               install -Dm644 assets/brand/gnil-fm.svg \
                 $out/share/icons/hicolor/scalable/apps/gnil-fm.svg
               for size in 32 64 128 256 512; do
@@ -210,8 +222,14 @@
               "$package/share/dbus-1/services/org.freedesktop.impl.portal.desktop.gnilfm.service"
             test -f \
               "$package/share/systemd/user/xdg-desktop-portal-gnilfm.service"
+            test -f \
+              "$package/share/dbus-1/services/org.freedesktop.FileManager1.service"
+            test -f \
+              "$package/share/systemd/user/gnil-fm-file-manager.service"
             test ! -e \
               "$package/lib/systemd/user/xdg-desktop-portal-gnilfm.service"
+            test ! -e \
+              "$package/lib/systemd/user/gnil-fm-file-manager.service"
             touch "$out"
           '';
         });

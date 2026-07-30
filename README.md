@@ -20,6 +20,7 @@ bounded previews.
 - staged, cancellable extraction for ZIP, TAR, 7z, RAR and common compressed streams
 - XDG configuration, Nix dev shell/package and Linux desktop metadata
 - D-Bus-activatable FileChooser portal backend with read-only Open, Save and SaveFiles dialogs
+- D-Bus-activatable `org.freedesktop.FileManager1` service for Show in Folder integration
 
 ## Develop
 
@@ -139,6 +140,10 @@ programs.gnil-fm.enable = true;
 programs.gnil-fm.portal.enable = true; # opt in as Niri's FileChooser backend
 ```
 
+Enabling the NixOS portal module defaults `programs.niri.useNautilus` to `false`. If another module
+sets that option explicitly, set it to `false` yourself so Nautilus does not also register
+`org.freedesktop.FileManager1`.
+
 For a per-user Home Manager installation and optional default directory handler:
 
 ```nix
@@ -167,6 +172,9 @@ programs.gnil-fm = {
   defaultFileManager = true;
   portal.enable = true;
 };
+
+# modules/desktop/niri.nix
+programs.niri.useNautilus = false;
 ```
 
 Then rebuild the repository's laptop target and start a fresh graphical session:
@@ -183,6 +191,9 @@ systemctl --user status xdg-desktop-portal.service
 busctl --user introspect \
   org.freedesktop.impl.portal.desktop.gnilfm \
   /org/freedesktop/portal/desktop
+busctl --user introspect \
+  org.freedesktop.FileManager1 \
+  /org/freedesktop/FileManager1
 ```
 
 The configuration file should select `gnilfm;gtk;` for
@@ -210,8 +221,10 @@ service rather than invoking this backend directly. Closing with Cancel, Escape,
 button resolves as user cancellation. Window creation failures resolve as an error instead of
 leaving the caller waiting.
 
-This package currently installs the main app and FileChooser backend as separate binaries and
-services. A separate `org.freedesktop.FileManager1` service is not provided yet.
+The main executable also serves `org.freedesktop.FileManager1` when D-Bus activates it with
+`--gapplication-service`. `ShowFolders` opens local directories, `ShowItems` opens each containing
+directory and selects the requested local items, and `ShowItemProperties` reuses gnil's Properties
+sheet. Remote URIs are rejected because gnil currently manages local filesystems only.
 
 D-Bus and systemd activation metadata is wired automatically by the Nix package. The portable
 tarball includes a runnable `gnil-fm-portal` launcher, but selecting it as the session backend still

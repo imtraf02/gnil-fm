@@ -1,0 +1,10 @@
+[Unit]
+Description=gnil-fm FileManager1 service
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.FileManager1
+ExecStart=@file_manager_executable@ --gapplication-service
+Restart=on-failure

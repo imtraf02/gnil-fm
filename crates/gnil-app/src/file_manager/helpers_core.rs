@@ -221,8 +221,8 @@ fn place_is_active(current_path: &Path, place_path: &Path) -> bool {
     current_path == place_path
 }
 
-fn initial_path() -> PathBuf {
-    env::args_os()
+fn initial_open_request() -> FileManagerOpenRequest {
+    let requested = env::args_os()
         .skip(1)
         .find(|argument| !argument.to_string_lossy().starts_with('-'))
         .and_then(|argument| {
@@ -232,10 +232,21 @@ fn initial_path() -> PathBuf {
             } else {
                 Some(PathBuf::from(argument))
             }
-        })
-        .filter(|path| path.is_dir())
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
+        });
+    if let Some(path) = requested {
+        if path.is_dir() {
+            return FileManagerOpenRequest::browse(path);
+        }
+        if path.exists()
+            && let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty())
+        {
+            return FileManagerOpenRequest::new(parent.to_path_buf(), vec![path], false);
+        }
+    }
+    FileManagerOpenRequest::browse(
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from(".")),
+    )
 }
 
 fn clipboard_text(clipboard: &FileClipboard) -> Result<String, String> {

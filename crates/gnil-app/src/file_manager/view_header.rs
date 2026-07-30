@@ -675,7 +675,7 @@ impl FileManager {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.stop_propagation();
                                         if let Some(target) = click_target.clone() {
-                                            this.pending_reveal = None;
+                                            this.pending_reveal.clear();
                                             this.navigate_path(target);
                                             this.load_directory(cx);
                                         }

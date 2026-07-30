@@ -5,7 +5,10 @@ fn selected_theme_name(settings: &AppSettings, appearance: ThemeAppearance) -> &
     }
 }
 
-fn open_main_window(initial_path: &Path, cx: &mut App) {
+pub(crate) fn open_main_window(
+    request: FileManagerOpenRequest,
+    cx: &mut App,
+) -> Result<(), String> {
     let bounds = Bounds::centered(None, size(px(1180.0), px(760.0)), cx);
     let window = cx
         .open_window(
@@ -19,10 +22,13 @@ fn open_main_window(initial_path: &Path, cx: &mut App) {
                 app_id: Some("gnil-fm".into()),
                 ..Default::default()
             },
-            |window, cx| {
+            move |window, cx| {
                 let system_appearance = window_theme_appearance(window);
                 cx.new(|cx| {
-                    let mut manager = FileManager::new(initial_path, system_appearance, cx);
+                    let mut manager =
+                        FileManager::new(&request.directory, system_appearance, cx);
+                    manager.pending_reveal = request.reveal;
+                    manager.pending_show_properties = request.show_properties;
                     manager.load_directory(cx);
                     manager.refresh_devices(cx);
                     FileManager::schedule_device_monitor(cx);
@@ -30,7 +36,7 @@ fn open_main_window(initial_path: &Path, cx: &mut App) {
                 })
             },
         )
-        .expect("open gnil-fm window");
+        .map_err(|error| error.to_string())?;
     window
         .update(cx, |manager, window, cx| {
             manager.appearance_subscription =
@@ -39,6 +45,7 @@ fn open_main_window(initial_path: &Path, cx: &mut App) {
         })
         .ok();
     cx.activate(true);
+    Ok(())
 }
 
 fn setting_section_header(title: &'static str, description: &'static str) -> gpui::Div {

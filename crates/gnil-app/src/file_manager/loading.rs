@@ -118,26 +118,10 @@ impl FileManager {
                                 .cursor
                                 .and_then(|index| this.snapshot.entries.get(index))
                                 .map(|entry| entry.path.clone());
+                            let properties_target_items = !this.pending_reveal.is_empty();
                             this.loading = !complete;
                             this.snapshot = Arc::new(snapshot);
-                            if let Some(path) = this.pending_reveal.take() {
-                                if let Some(index) = this
-                                    .snapshot
-                                    .entries
-                                    .iter()
-                                    .position(|entry| entry.path == path)
-                                {
-                                    this.selection.select_only(index, &this.snapshot.entries);
-                                    this.tab.selected_path = Some(path);
-                                    this.file_list_scroll
-                                        .scroll_to_item_strict(index, ScrollStrategy::Center);
-                                    this.load_preview(cx);
-                                } else {
-                                    this.selection.clear();
-                                    this.error =
-                                        Some("The file is no longer in this folder".into());
-                                }
-                            } else {
+                            if this.pending_reveal.is_empty() {
                                 this.selection.retain_existing(&this.snapshot.entries);
                                 if let Some(index) = cursor_path.and_then(|path| {
                                     this.snapshot
@@ -149,6 +133,52 @@ impl FileManager {
                                     if this.selection.anchor.is_some() {
                                         this.selection.anchor = Some(index);
                                     }
+                                }
+                            } else {
+                                let indices: Vec<_> = this
+                                    .pending_reveal
+                                    .iter()
+                                    .filter_map(|path| {
+                                        this.snapshot
+                                            .entries
+                                            .iter()
+                                            .position(|entry| entry.path == *path)
+                                    })
+                                    .collect();
+                                if let Some(first) = indices.first().copied() {
+                                    let baseline = SelectionState::default();
+                                    this.selection.apply_indices(
+                                        &baseline,
+                                        indices.iter().copied(),
+                                        gnil_core::SelectionMerge::Replace,
+                                        Some(first),
+                                        &this.snapshot.entries,
+                                    );
+                                    let path = this.snapshot.entries[first].path.clone();
+                                    this.tab.selected_path = Some(path);
+                                    this.file_list_scroll
+                                        .scroll_to_item_strict(first, ScrollStrategy::Center);
+                                    this.load_preview(cx);
+                                }
+                                let all_found = indices.len() == this.pending_reveal.len();
+                                if complete || (all_found && !this.pending_show_properties) {
+                                    if complete && !all_found {
+                                        this.error = Some(if indices.is_empty() {
+                                            "The requested item is no longer in this folder".into()
+                                        } else {
+                                            "Some requested items are no longer in this folder"
+                                                .into()
+                                        });
+                                    }
+                                    this.pending_reveal.clear();
+                                }
+                            }
+                            if complete && this.pending_show_properties {
+                                this.pending_show_properties = false;
+                                if !properties_target_items {
+                                    this.open_folder_properties(cx);
+                                } else if this.selection.selected_count() > 0 {
+                                    this.open_selected_properties(cx);
                                 }
                             }
                             this.perf_trace.record_folder_phase(
@@ -162,7 +192,8 @@ impl FileManager {
                         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                         Err(error) => {
                             this.loading = false;
-                            this.pending_reveal = None;
+                            this.pending_reveal.clear();
+                            this.pending_show_properties = false;
                             this.error = Some(error.to_string());
                         }
                     }

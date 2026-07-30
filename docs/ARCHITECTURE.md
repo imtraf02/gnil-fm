@@ -10,7 +10,7 @@ recursive I/O.
 | `gnil-fs` | Directory scans, fuzzy search, watching, Git status, prioritized jobs and safe mutations |
 | `gnil-gpui` | First-party Linux/Wayland GPUI runtime tailored to gnil-fm |
 | `gnil-preview` | Bounded text, image, directory and metadata previews |
-| `gnil-app` | GPUI file-manager window plus the independent `gnil-fm-portal` picker service |
+| `gnil-app` | GPUI file-manager window, FileManager1 service and independent `gnil-fm-portal` picker |
 
 The main binary is intentionally thin. File-manager behavior is grouped under
 `gnil-app/src/file_manager/` by loading, interaction, operation and view concerns. First-party Rust
@@ -77,3 +77,11 @@ Linux/Wayland and keeps the application-specific xdg-foreign v2 parent handle, n
 dynamic action registration, inspector tooling and unrelated services are intentionally absent.
 Unsafe Rust is denied at the crate root and allowed only in explicitly marked low-level runtime,
 renderer and Wayland boundary modules.
+
+## File manager D-Bus service
+
+When D-Bus starts `gnil-fm --gapplication-service`, the process owns
+`org.freedesktop.FileManager1` and forwards `ShowFolders`, `ShowItems` and `ShowItemProperties`
+requests from its D-Bus thread to the GPUI event loop. Local URIs are validated before any window is
+opened. Requests for items are grouped by containing directory so one window can reveal and select
+multiple siblings.

@@ -172,6 +172,27 @@ const GRID_CARD_TARGET_WIDTH: f32 = 160.0;
 const GRID_CARD_GAP: f32 = 12.0;
 const GRID_HORIZONTAL_PADDING: f32 = 12.0;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FileManagerOpenRequest {
+    pub(crate) directory: PathBuf,
+    pub(crate) reveal: Vec<PathBuf>,
+    pub(crate) show_properties: bool,
+}
+
+impl FileManagerOpenRequest {
+    pub(crate) fn new(directory: PathBuf, reveal: Vec<PathBuf>, show_properties: bool) -> Self {
+        Self {
+            directory,
+            reveal,
+            show_properties,
+        }
+    }
+
+    pub(crate) fn browse(directory: PathBuf) -> Self {
+        Self::new(directory, Vec::new(), false)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RenameScope {
     Stem,
@@ -459,7 +480,8 @@ struct FileManager {
     _path_input_subscription: Subscription,
     file_search: FileSearchState,
     _file_search_subscription: Subscription,
-    pending_reveal: Option<PathBuf>,
+    pending_reveal: Vec<PathBuf>,
+    pending_show_properties: bool,
     file_list_scroll: UniformListScrollHandle,
     rendered_file_range: Range<usize>,
     grid_columns: usize,
@@ -774,7 +796,8 @@ impl FileManager {
                 dirs::home_dir().unwrap_or_else(|| path.to_path_buf()),
             ),
             _file_search_subscription: file_search_subscription,
-            pending_reveal: None,
+            pending_reveal: Vec::new(),
+            pending_show_properties: false,
             file_list_scroll: UniformListScrollHandle::new(),
             rendered_file_range: 0..0,
             grid_columns: 1,
@@ -867,12 +890,14 @@ pub fn run() {
         println!("gnil-fm {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    let initial_path = initial_path();
+    let request = initial_open_request();
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             cx.on_action(|_: &Quit, cx| cx.quit());
-            open_main_window(&initial_path, cx);
+            if let Err(error) = open_main_window(request, cx) {
+                eprintln!("Could not open gnil-fm window: {error}");
+            }
         });
 }
 
@@ -1159,6 +1184,64 @@ mod tests {
             assert_eq!(manager.selection.selected_count(), 0);
             assert_eq!(manager.rendered_file_range, 0..0);
         });
+    }
+
+    #[gpui::test]
+    fn external_reveal_selects_multiple_siblings_after_loading(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first.txt");
+        let second = temp.path().join("second.txt");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        let initial_path = temp.path().to_path_buf();
+        let first_for_view = first.clone();
+        let second_for_view = second.clone();
+        let (manager, cx) = cx.add_window_view(move |_, cx| {
+            let mut manager = FileManager::new(&initial_path, ThemeAppearance::Dark, cx);
+            manager.pending_reveal = vec![first_for_view, second_for_view];
+            manager.load_directory(cx);
+            manager
+        });
+
+        cx.run_until_parked();
+
+        assert!(cx.read(|cx| {
+            let manager = manager.read(cx);
+            manager.snapshot.phase == DirectoryLoadPhase::Complete
+                && manager.selection.selected_count() == 2
+                && manager.selection.contains_path(&first)
+                && manager.selection.contains_path(&second)
+                && manager.pending_reveal.is_empty()
+        }));
+    }
+
+    #[gpui::test]
+    fn external_properties_waits_for_metadata_and_opens_existing_sheet(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("report.txt");
+        std::fs::write(&file, b"report").unwrap();
+        let initial_path = temp.path().to_path_buf();
+        let file_for_view = file.clone();
+        let (manager, cx) = cx.add_window_view(move |_, cx| {
+            let mut manager = FileManager::new(&initial_path, ThemeAppearance::Dark, cx);
+            manager.pending_reveal = vec![file_for_view];
+            manager.pending_show_properties = true;
+            manager.load_directory(cx);
+            manager
+        });
+
+        cx.run_until_parked();
+
+        assert!(cx.read(|cx| {
+            let manager = manager.read(cx);
+            manager.snapshot.phase == DirectoryLoadPhase::Complete
+                && manager.selection.contains_path(&file)
+                && !manager.pending_show_properties
+                && matches!(
+                    manager.operation_sheet,
+                    Some(OperationSheet::Permissions { .. })
+                )
+        }));
     }
 
     #[gpui::test]

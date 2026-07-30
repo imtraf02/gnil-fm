@@ -301,6 +301,10 @@ impl FileManager {
     }
 
     fn open_permissions(&mut self, _: &OpenPermissions, _: &mut Window, cx: &mut Context<Self>) {
+        self.open_selected_properties(cx);
+    }
+
+    fn open_selected_properties(&mut self, cx: &mut Context<Self>) {
         if self.tab.root == TabRoot::Trash {
             return;
         }
@@ -657,7 +661,8 @@ impl FileManager {
                                 }
                             ));
                         }
-                        this.pending_reveal = outcome.affected_paths.first().cloned();
+                        this.pending_reveal =
+                            outcome.affected_paths.first().cloned().into_iter().collect();
                         this.operation_progress = None;
                         this.load_directory(cx);
                     }

@@ -255,10 +255,10 @@ impl FileManager {
         self.finish_file_search_close(cx);
         window.focus(&self.focus_handle(cx));
         if entry.is_directory_like() {
-            self.pending_reveal = None;
+            self.pending_reveal.clear();
             self.navigate_path(entry.path);
         } else if let Some(parent) = entry.path.parent() {
-            self.pending_reveal = Some(entry.path.clone());
+            self.pending_reveal = vec![entry.path.clone()];
             self.navigate_path(parent.to_path_buf());
         } else {
             self.status_message = Some("Search result is no longer available".into());

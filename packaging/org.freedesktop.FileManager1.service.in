@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.freedesktop.FileManager1
+Exec=@file_manager_executable@ --gapplication-service
+SystemdService=gnil-fm-file-manager.service
