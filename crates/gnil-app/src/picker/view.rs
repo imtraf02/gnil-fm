@@ -3,8 +3,12 @@ impl Picker {
         let places = picker_places();
         let current = self.current_dir.clone();
         let mut sidebar = div()
+            .id("picker-sidebar")
             .w(px(190.0))
+            .h_full()
+            .min_h_0()
             .flex_none()
+            .overflow_y_scroll()
             .border_r_1()
             .border_color(rgb(border()))
             .p_3()
@@ -40,6 +44,12 @@ impl Picker {
                     .with_focus_ring()
                     .on_click(cx.listener(|this, _, _, cx| this.show_recent(cx))),
             );
+        }
+        if !self.favorites.is_empty() {
+            sidebar = sidebar.child(section_label("FAVORITES").mt_4());
+        }
+        for (index, path) in self.favorites.iter().cloned().enumerate() {
+            sidebar = sidebar.child(self.render_picker_favorite(index, path, cx));
         }
         sidebar = sidebar.child(section_label("DEVICES").mt_4());
         for (index, device) in self.devices.iter().enumerate() {
@@ -84,6 +94,29 @@ impl Picker {
             );
         }
         sidebar.into_any_element()
+    }
+
+    fn render_picker_favorite(
+        &self,
+        index: usize,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let active = self.location == PickerLocation::Directory && self.current_dir == path;
+        let label = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        sidebar_item_with_icon(label, "icons/folder-favorite.svg", active)
+            .id(("picker-favorite", stable_picker_path_id(&path)))
+            .with_focus_ring()
+            .when(index == 0, |row| {
+                row.debug_selector(|| "picker-favorite-0".into())
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.navigate(path.clone(), cx);
+            }))
+            .into_any_element()
     }
 
     fn render_toolbar(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -207,6 +240,9 @@ impl Picker {
                         let detail = picker_entry_detail(&entry, is_directory);
                         let row = div()
                             .id(("picker-entry", index))
+                            .when(index == 0, |row| {
+                                row.debug_selector(|| "picker-entry-0".into())
+                            })
                             .when(!disabled, FocusableControl::with_focus_ring)
                             .h_9()
                             .w_full()
@@ -272,6 +308,7 @@ impl Picker {
                     secondary_button(label)
                         .id("picker-filter-trigger")
                         .with_focus_ring()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(|this, _, _, cx| {
                             if this.filter_open {
                                 this.dismiss_picker_menus(cx);
@@ -305,7 +342,10 @@ impl Picker {
                     .bg(rgb(surface()))
                     .shadow_lg()
                     .occlude()
-                    .on_any_mouse_down(|_, _, cx| cx.stop_propagation()),
+                    .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                    .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.dismiss_picker_menus(cx);
+                    })),
                 |menu, (index, filter)| {
                     let label = filter.label.clone();
                     menu.child(
@@ -386,6 +426,9 @@ impl Picker {
                             secondary_button(format!("{}: {}", choice.label, selected_label))
                                 .id(("picker-choice-trigger", index))
                                 .with_focus_ring()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if this.choice_open == Some(index) {
                                         this.dismiss_picker_menus(cx);
@@ -423,7 +466,10 @@ impl Picker {
                     .bg(rgb(surface()))
                     .shadow_lg()
                     .occlude()
-                    .on_any_mouse_down(|_, _, cx| cx.stop_propagation()),
+                    .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                    .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.dismiss_picker_menus(cx);
+                    })),
                 |menu, (option_index, (id, label))| {
                     let selected = self.choices[index].selected == id;
                     menu.child(
@@ -465,21 +511,6 @@ impl Picker {
                 .child(panel),
         )
         .with_priority(MENU_PRIORITY)
-        .into_any_element()
-    }
-
-    fn render_picker_menu_backdrop(cx: &mut Context<Self>) -> AnyElement {
-        deferred(
-            div()
-                .absolute()
-                .inset_0()
-                .occlude()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| this.dismiss_picker_menus(cx)),
-                ),
-        )
-        .with_priority(BACKDROP_PRIORITY)
         .into_any_element()
     }
 

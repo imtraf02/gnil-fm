@@ -213,6 +213,10 @@ read-only: no rename, delete, paste, filesystem drag-and-drop, Trash or terminal
 registered. On Wayland, `wayland:<handle>` parents are attached with xdg-foreign v2; compositors
 without that protocol receive an independent toplevel as a safe fallback.
 
+The NixOS module also enables FUSE when `programs.gnil-fm.portal.enable` is set. This provides the
+`fusermount3` wrapper required by `xdg-document-portal` to export selected files to sandboxed apps.
+For a Home Manager-only setup, enable `programs.fuse.enable = true` in the host NixOS configuration.
+
 The backend methods follow the implementation-side portal contract: the temporary
 `org.freedesktop.impl.portal.Request` object accepts `Close`, while the method returns the response
 code and results after interaction. The public `xdg-desktop-portal` service owns the caller-facing

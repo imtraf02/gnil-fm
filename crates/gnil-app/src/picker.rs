@@ -3,6 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
     fs,
+    hash::{DefaultHasher, Hash as _, Hasher as _},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -22,8 +23,9 @@ use gnil_fs::{
 };
 use gpui::{
     AnchoredPositionMode, AnyElement, AnyWindowHandle, App, ClickEvent, Context, Corner, Entity,
-    FocusHandle, Focusable as _, KeyBinding, MouseButton, Render, SharedString, Subscription,
-    Window, actions, anchored, deferred, div, img, point, prelude::*, px, rgb, uniform_list,
+    FocusHandle, Focusable as _, KeyBinding, MouseButton, MouseDownEvent, Render, SharedString,
+    Subscription, Window, actions, anchored, deferred, div, img, point, prelude::*, px, rgb,
+    uniform_list,
 };
 use quick_xml::{Reader, events::Event};
 use url::Url;
@@ -42,7 +44,7 @@ use crate::{
     },
     ui::control::FocusableControl,
     ui::icon::{IconSize, IconTone, ui_icon},
-    ui::overlay::{BACKDROP_PRIORITY, MENU_PRIORITY, OverlayMotionState, animate_overlay},
+    ui::overlay::{MENU_PRIORITY, OverlayMotionState, animate_overlay},
 };
 
 actions!(
@@ -220,6 +222,7 @@ struct Picker {
     devices: Vec<gnil_fs::DeviceEntry>,
     device_refresh: DeviceRefresh,
     device_scan_error: Option<String>,
+    favorites: Vec<PathBuf>,
     filters: Vec<PortalFilter>,
     filter_index: Option<usize>,
     filter_open: bool,
@@ -300,13 +303,14 @@ impl Render for Picker {
                         div()
                             .flex_1()
                             .min_w_0()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
                             .p_3()
                             .child(self.render_file_list(cx)),
                     ),
             )
-            .when(self.filter_open || self.choice_open.is_some(), |root| {
-                root.child(Self::render_picker_menu_backdrop(cx))
-            })
             .child(self.render_footer(cx))
     }
 }

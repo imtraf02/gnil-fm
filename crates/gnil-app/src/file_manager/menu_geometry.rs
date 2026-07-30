@@ -100,7 +100,24 @@ fn action_menu_panel_height(entries: &[MenuEntry]) -> f32 {
                 MenuEntry::Separator => MENU_SEPARATOR_HEIGHT,
                 MenuEntry::Action { .. } | MenuEntry::Submenu { .. } => ACTION_MENU_ROW_HEIGHT,
             })
-            .sum::<f32>()
+        .sum::<f32>()
+}
+
+fn open_with_submenu_panel_height(submenu: &crate::action_menu::OpenWithSubmenuState) -> f32 {
+    let application_rows = if submenu.loading
+        || submenu.error.is_some()
+        || submenu.applications.is_empty()
+    {
+        1
+    } else {
+        submenu.applications.len()
+    };
+    let application_rows =
+        f32::from(u16::try_from(application_rows).unwrap_or(u16::MAX));
+    MENU_PANEL_INSET * 2.0
+        + application_rows * ACTION_MENU_ROW_HEIGHT
+        + MENU_SEPARATOR_HEIGHT
+        + ACTION_MENU_ROW_HEIGHT
 }
 
 fn snapped_menu_origin(
@@ -162,6 +179,28 @@ fn submenu_placement(
     }
 }
 
+fn submenu_panel_bounds(
+    root_origin: gpui::Point<gpui::Pixels>,
+    root_width: f32,
+    placement: SubmenuPlacement,
+    submenu_width: f32,
+    submenu_height: f32,
+) -> gpui::Bounds<gpui::Pixels> {
+    let x = match placement.side {
+        SubmenuSide::Left => {
+            f32::from(root_origin.x) - MENU_SUBMENU_GAP - submenu_width
+        }
+        SubmenuSide::Right => f32::from(root_origin.x) + root_width + MENU_SUBMENU_GAP,
+    };
+    gpui::Bounds {
+        origin: gpui::point(
+            gpui::px(x),
+            gpui::px(f32::from(root_origin.y) + placement.top),
+        ),
+        size: gpui::size(gpui::px(submenu_width), gpui::px(submenu_height)),
+    }
+}
+
 #[cfg(test)]
 mod menu_geometry_tests {
     use super::*;
@@ -180,6 +219,21 @@ mod menu_geometry_tests {
         );
 
         assert_eq!(placement.side, SubmenuSide::Left);
+    }
+
+    #[test]
+    fn submenu_bounds_include_the_rendered_submenu_only() {
+        let root = point(px(100.0), px(80.0));
+        let placement = SubmenuPlacement {
+            side: SubmenuSide::Right,
+            top: 24.0,
+        };
+        let bounds = submenu_panel_bounds(root, 288.0, placement, 280.0, 91.0);
+
+        assert_eq!(bounds.origin, point(px(392.0), px(104.0)));
+        assert_eq!(bounds.size, size(px(280.0), px(91.0)));
+        assert!(bounds.contains(&point(px(400.0), px(110.0))));
+        assert!(!bounds.contains(&point(px(400.0), px(200.0))));
     }
 
     #[test]

@@ -1,23 +1,3 @@
-struct CommandBarTooltip {
-    label: SharedString,
-}
-
-impl Render for CommandBarTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(border_focused()))
-            .bg(rgb(surface_elevated()))
-            .shadow_md()
-            .text_xs()
-            .text_color(rgb(text_emphasized()))
-            .child(self.label.clone())
-    }
-}
-
 impl FileManager {
     #[allow(clippy::too_many_lines)]
     fn render_command_bar(
@@ -237,6 +217,40 @@ impl FileManager {
                 self.tab.root != TabRoot::Trash || has_selection,
                 cx,
             ))
+            .child(div().flex_1().min_w_0())
+            .child(self.render_preview_panel_button(cx))
+            .into_any_element()
+    }
+
+    fn render_preview_panel_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let visible = self.preview_visible;
+        div()
+            .id("command-preview-panel")
+            .debug_selector(|| "preview-panel-toggle".into())
+            .size_8()
+            .flex_none()
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .when(visible, |button| button.bg(rgb(accent_background())))
+            .hover(move |style| {
+                style.bg(rgb(if visible { accent_hover() } else { border() }))
+            })
+            .with_focus_ring()
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.toggle_preview(&TogglePreview, window, cx);
+            }))
+            .child(ui_icon(
+                "icons/action-panel-right.svg",
+                IconSize::Compact,
+                if visible {
+                    IconTone::Accent
+                } else {
+                    IconTone::Default
+                },
+            ))
             .into_any_element()
     }
 
@@ -255,14 +269,20 @@ impl FileManager {
             .command_bar_menu
             .as_ref()
             .is_some_and(|menu| menu.kind == kind);
-        command_bar_button(id, label, icon, show_label, enabled, false, cx)
-            .relative()
+        let button = command_bar_button(id, label, icon, show_label, enabled, false, cx)
+            .debug_selector(move || format!("command-bar-menu-trigger-{kind:?}"))
             .when(open, |button| button.bg(rgb(accent_background())))
             .when(enabled, |button| {
-                button.on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_command_bar_menu(kind, cx);
-                }))
-            })
+                button
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_command_bar_menu(kind, cx);
+                    }))
+            });
+        div()
+            .relative()
+            .flex_none()
+            .child(button)
             .when(open, |button| {
                 button.child(self.render_command_bar_menu(kind, cx))
             })
@@ -286,6 +306,7 @@ impl FileManager {
         let panel = items.into_iter().enumerate().fold(
             div()
                 .id(("command-bar-menu", kind as usize))
+                .debug_selector(move || format!("command-bar-menu-panel-{kind:?}"))
                 .w(px(272.0))
                 .p_1()
                 .rounded_lg()
@@ -295,7 +316,10 @@ impl FileManager {
                 .shadow_lg()
                 .text_xs()
                 .occlude()
-                .on_any_mouse_down(|_, _, cx| cx.stop_propagation()),
+                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.dismiss_command_bar_menu(cx);
+                })),
             |panel, (index, item)| {
                 let add_separator = matches!(kind, CommandBarMenuKind::Sort) && index == 4;
                 panel
@@ -318,7 +342,6 @@ impl FileManager {
                             .rounded_md()
                             .flex()
                             .items_center()
-                            .gap_2()
                             .text_color(if !item.enabled {
                                 rgb(border_focused())
                             } else if item.danger {
@@ -338,28 +361,26 @@ impl FileManager {
                                             && let Some(menu) = this.command_bar_menu.as_mut()
                                         {
                                             menu.focused = Some(index);
-                                            cx.notify();
+                                            this.invalidate_surfaces(
+                                                SurfaceMask::COMMAND_BAR,
+                                                cx,
+                                            );
                                         }
                                     }))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.dispatch_command_bar_command(item.command, window, cx);
                                     }))
                             })
-                            .child(if let Some(icon) = item.icon {
-                                ui_icon(
-                                    icon,
-                                    IconSize::Small,
-                                    if item.danger {
-                                        IconTone::Danger
-                                    } else {
-                                        IconTone::Muted
-                                    },
-                                )
-                                .into_any_element()
-                            } else {
-                                div().size_4().flex_none().into_any_element()
-                            })
-                            .child(div().flex_1().min_w_0().truncate().child(item.label))
+                            .child(
+                                div()
+                                    .debug_selector(move || {
+                                        format!("command-bar-menu-label-{kind:?}-{index}")
+                                    })
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(item.label),
+                            )
                             .child(
                                 div()
                                     .text_color(rgb(text_muted()))
@@ -396,15 +417,14 @@ impl FileManager {
         deferred(
             anchored()
                 .position_mode(AnchoredPositionMode::Local)
-                .position(point(px(0.0), px(38.0)))
+                .position(point(px(-5.0), px(0.0)))
                 .anchor(Corner::TopLeft)
-                .snap_to_window()
+                .snap_to_window_with_margin(px(MENU_VIEWPORT_MARGIN))
                 .child(panel),
         )
         .with_priority(MENU_PRIORITY)
         .into_any_element()
     }
-
 }
 
 fn command_bar_separator() -> AnyElement {
@@ -427,7 +447,6 @@ fn command_bar_button(
     danger: bool,
     _cx: &mut Context<FileManager>,
 ) -> Stateful<Div> {
-    let tooltip_label: SharedString = label.into();
     div()
         .id(id)
         .h_8()
@@ -452,11 +471,6 @@ fn command_bar_button(
                 .hover(|style| style.bg(rgb(border())))
                 .active(|style| style.bg(rgb(accent_background())))
                 .with_focus_ring()
-        })
-        .tooltip(move |_, app| {
-            AnyView::from(app.new(|_| CommandBarTooltip {
-                label: tooltip_label.clone(),
-            }))
         })
         .child(ui_icon(
             icon,

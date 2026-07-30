@@ -66,6 +66,7 @@ impl Picker {
             devices: Vec::new(),
             device_refresh: DeviceRefresh::new(),
             device_scan_error: None,
+            favorites: settings.favorites,
             filters,
             filter_index,
             filter_open: false,

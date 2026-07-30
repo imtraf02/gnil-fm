@@ -45,30 +45,6 @@ impl FileManager {
         .into_any_element()
     }
 
-    fn render_context_menu_backdrop(cx: &mut Context<Self>) -> AnyElement {
-        deferred(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .occlude()
-                .on_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                    if this.appearance_menu_open {
-                        this.dismiss_appearance_menu(cx);
-                    } else if this.command_bar_menu.is_some() {
-                        this.dismiss_command_bar_menu(cx);
-                    } else if this.empty_space_menu.is_some() {
-                        this.dismiss_empty_space_menu(cx);
-                    } else {
-                        this.dismiss_action_menu(cx);
-                    }
-                })),
-        )
-        .with_priority(BACKDROP_PRIORITY)
-        .into_any_element()
-    }
-
     fn render_empty_space_menu(
         &self,
         window: &mut Window,
@@ -99,6 +75,15 @@ impl FileManager {
         });
         let root =
             Self::render_empty_space_panel(menu.root_entries.clone(), menu.focused_root, false, cx);
+        let submenu_bounds = submenu_placement.map(|placement| {
+            submenu_panel_bounds(
+                root_origin,
+                EMPTY_SPACE_MENU_WIDTH,
+                placement,
+                EMPTY_SPACE_MENU_WIDTH,
+                empty_space_panel_height(&menu.submenu_entries),
+            )
+        });
         let panels = div()
             .relative()
             .w(px(EMPTY_SPACE_MENU_WIDTH))
@@ -108,7 +93,17 @@ impl FileManager {
                 panels.child(
                     self.render_empty_space_submenu_overlay(menu, root_origin, placement, cx),
                 )
-            });
+            })
+            .on_mouse_down_out(cx.listener(
+                move |this, event: &MouseDownEvent, _, cx| {
+                    if submenu_bounds
+                        .is_some_and(|bounds| bounds.contains(&event.position))
+                    {
+                        return;
+                    }
+                    this.dismiss_empty_space_menu(cx);
+                },
+            ));
         let panels = if self.reduced_motion {
             panels.into_any_element()
         } else {
@@ -269,6 +264,7 @@ impl FileManager {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_action_menu_panel(
         &self,
         placement: ActionMenuPlacement,
@@ -337,6 +333,21 @@ impl FileManager {
                 Self::render_action_menu_entry(panel, index, entry, focused, cx)
             },
         );
+        let submenu_height = menu
+            .open_with_submenu
+            .as_ref()
+            .map(open_with_submenu_panel_height);
+        let submenu_bounds = submenu_placement
+            .zip(submenu_height)
+            .map(|(placement, height)| {
+                submenu_panel_bounds(
+                    root_origin,
+                    ACTION_MENU_WIDTH,
+                    placement,
+                    OPEN_WITH_SUBMENU_WIDTH,
+                    height,
+                )
+            });
         let panels = div()
             .relative()
             .w(px(ACTION_MENU_WIDTH))
@@ -344,7 +355,17 @@ impl FileManager {
             .child(root_panel)
             .when_some(submenu_placement, |panels, placement| {
                 panels.child(self.render_action_submenu_overlay(root_origin, placement, cx))
-            });
+            })
+            .on_mouse_down_out(cx.listener(
+                move |this, event: &MouseDownEvent, _, cx| {
+                    if submenu_bounds
+                        .is_some_and(|bounds| bounds.contains(&event.position))
+                    {
+                        return;
+                    }
+                    this.dismiss_action_menu(cx);
+                },
+            ));
         if self.reduced_motion {
             panels.into_any_element()
         } else {

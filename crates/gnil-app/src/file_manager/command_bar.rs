@@ -42,7 +42,6 @@ struct CommandBarMenuItem {
     command: CommandBarCommand,
     label: &'static str,
     shortcut: Option<&'static str>,
-    icon: Option<&'static str>,
     enabled: bool,
     checked: bool,
     danger: bool,
@@ -101,14 +100,12 @@ fn command_bar_item(
     command: CommandBarCommand,
     label: &'static str,
     shortcut: Option<&'static str>,
-    icon: Option<&'static str>,
     enabled: bool,
 ) -> CommandBarMenuItem {
     CommandBarMenuItem {
         command,
         label,
         shortcut,
-        icon,
         enabled,
         checked: false,
         danger: false,
@@ -124,7 +121,6 @@ fn command_bar_checked_item(
         command,
         label,
         shortcut: None,
-        icon: None,
         enabled: true,
         checked,
         danger: false,
@@ -141,21 +137,18 @@ impl FileManager {
                     CommandBarCommand::NewFolder,
                     "Folder",
                     Some("Ctrl+Shift+N"),
-                    Some("icons/folder-closed.svg"),
                     writes_enabled && self.tab.root != TabRoot::Trash,
                 ),
                 command_bar_item(
                     CommandBarCommand::NewFile,
                     "File",
                     None,
-                    Some("icons/file-generic.svg"),
                     writes_enabled && self.tab.root != TabRoot::Trash,
                 ),
                 command_bar_item(
                     CommandBarCommand::NewSymlink,
                     "Symlink",
                     Some("Ctrl+Shift+L"),
-                    Some("icons/action-link.svg"),
                     writes_enabled && self.tab.root != TabRoot::Trash,
                 ),
             ],
@@ -224,7 +217,6 @@ impl FileManager {
                     CommandBarCommand::CopyPathAbsolute,
                     "Copy original path",
                     Some("Ctrl+Shift+C"),
-                    Some("icons/action-copy.svg"),
                     true,
                 ));
             }
@@ -236,14 +228,12 @@ impl FileManager {
                 CommandBarCommand::Cut,
                 "Cut",
                 Some("Ctrl+X"),
-                Some("icons/action-cut.svg"),
                 has_selection,
             ));
             items.push(command_bar_item(
                 CommandBarCommand::Copy,
                 "Copy",
                 Some("Ctrl+C"),
-                Some("icons/action-copy.svg"),
                 has_selection,
             ));
         }
@@ -252,14 +242,12 @@ impl FileManager {
                 CommandBarCommand::Rename,
                 "Rename",
                 Some("F2"),
-                Some("icons/action-rename.svg"),
                 has_selection && writes_enabled,
             ));
             let mut trash = command_bar_item(
                 CommandBarCommand::Trash,
                 "Move to Trash",
                 Some("Delete"),
-                Some("icons/trash.svg"),
                 has_selection && writes_enabled,
             );
             trash.danger = true;
@@ -278,7 +266,6 @@ impl FileManager {
                 CommandBarCommand::Open,
                 "Open",
                 Some("Enter"),
-                None,
                 true,
             ));
         }
@@ -287,7 +274,6 @@ impl FileManager {
                 CommandBarCommand::OpenWith,
                 "Open with…",
                 None,
-                Some("icons/action-open-with.svg"),
                 true,
             ));
         }
@@ -300,7 +286,6 @@ impl FileManager {
                     "Add to Favorites"
                 },
                 Some("Ctrl+D"),
-                Some("icons/action-star.svg"),
                 true,
             ));
         }
@@ -309,14 +294,12 @@ impl FileManager {
                 CommandBarCommand::Extract,
                 "Extract",
                 Some("Ctrl+E"),
-                Some("icons/file-archive.svg"),
                 writes_enabled,
             ));
             items.push(command_bar_item(
                 CommandBarCommand::ExtractTo,
                 "Extract to…",
                 Some("Ctrl+Shift+E"),
-                Some("icons/file-archive.svg"),
                 writes_enabled,
             ));
         }
@@ -325,14 +308,12 @@ impl FileManager {
                 CommandBarCommand::CopyPathAbsolute,
                 "Copy absolute path",
                 Some("Ctrl+Shift+C"),
-                Some("icons/action-copy.svg"),
                 true,
             ));
             items.push(command_bar_item(
                 CommandBarCommand::CopyPathRelative,
                 "Copy relative path",
                 Some("Ctrl+Alt+C"),
-                Some("icons/action-copy.svg"),
                 true,
             ));
         }
@@ -344,7 +325,6 @@ impl FileManager {
                 "Folder Properties"
             },
             Some("Alt+Enter"),
-            Some("icons/action-permissions.svg"),
             if has_selection {
                 context.permissions_supported && writes_enabled
             } else {
@@ -356,7 +336,6 @@ impl FileManager {
                 CommandBarCommand::DeletePermanently,
                 "Delete Permanently",
                 Some("Shift+Delete"),
-                Some("icons/trash.svg"),
                 writes_enabled,
             );
             delete.danger = true;
@@ -376,20 +355,17 @@ mod command_bar_tests {
                 CommandBarCommand::NewFolder,
                 "Folder",
                 None,
-                None,
                 false,
             ),
             command_bar_item(
                 CommandBarCommand::NewFile,
                 "File",
                 None,
-                None,
                 true,
             ),
             command_bar_item(
                 CommandBarCommand::NewSymlink,
                 "Symlink",
-                None,
                 None,
                 true,
             ),

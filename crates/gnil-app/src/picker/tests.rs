@@ -1,7 +1,8 @@
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, sync::Arc};
 
 use gnil_core::{DirectoryLoadPhase, DirectorySnapshot, EntryMetadata, FileEntry, FileKind};
-use gpui::{Entity, TestAppContext, VisualTestContext};
+use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
+use tempfile::tempdir;
 
 use super::*;
 use crate::portal_protocol::{CommonOptions, FilterRule, OpenFileOptions, SaveFileOptions};
@@ -138,4 +139,113 @@ fn active_filter_keeps_folders_and_matching_files(cx: &mut TestAppContext) {
     });
 
     assert_eq!(visible, vec![0, 1]);
+}
+
+#[gpui::test]
+fn picker_list_has_height_and_renders_scanned_entries(cx: &mut TestAppContext) {
+    let (picker, cx) = add_picker(
+        cx,
+        PickerRequestKind::Open(OpenFileOptions {
+            common: common(),
+            multiple: false,
+            directory: false,
+            filters: Vec::new(),
+            current_filter: None,
+        }),
+    );
+    picker.update(cx, |picker, cx| {
+        picker.snapshot = Arc::new(DirectorySnapshot {
+            generation: 1,
+            path: PathBuf::from("/tmp"),
+            entries: vec![FileEntry {
+                path: PathBuf::from("/tmp/visible.txt"),
+                name: "visible.txt".into(),
+                kind: FileKind::File,
+                hidden: false,
+                metadata: EntryMetadata::Pending,
+                git_status: None,
+            }],
+            unreadable_entries: 0,
+            phase: DirectoryLoadPhase::Complete,
+        });
+        picker.visible_entries_key = None;
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let row = cx
+        .debug_bounds("picker-entry-0")
+        .expect("the first scanned entry should be rendered");
+    assert!(row.size.height > gpui::px(0.0));
+}
+
+#[gpui::test]
+fn picker_sidebar_renders_configured_favorites(cx: &mut TestAppContext) {
+    let favorite_root = tempdir().unwrap();
+    let favorite = favorite_root.path().join("favorite");
+    std::fs::create_dir(&favorite).unwrap();
+    let (picker, cx) = add_picker(
+        cx,
+        PickerRequestKind::Open(OpenFileOptions {
+            common: common(),
+            multiple: false,
+            directory: false,
+            filters: Vec::new(),
+            current_filter: None,
+        }),
+    );
+    picker.update(cx, |picker, cx| {
+        picker.favorites = vec![favorite];
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("picker-favorite-0").is_some(),
+        "configured favorites should be visible in the picker sidebar"
+    );
+}
+
+#[gpui::test]
+fn open_dropdown_does_not_block_clicks_outside(cx: &mut TestAppContext) {
+    let favorite_root = tempdir().unwrap();
+    let favorite = favorite_root.path().join("favorite");
+    std::fs::create_dir(&favorite).unwrap();
+    let filter = PortalFilter {
+        label: "Text".into(),
+        rules: vec![FilterRule::Glob("*.txt".into())],
+    };
+    let (picker, cx) = add_picker(
+        cx,
+        PickerRequestKind::Open(OpenFileOptions {
+            common: common(),
+            multiple: false,
+            directory: false,
+            filters: vec![filter.clone()],
+            current_filter: Some(filter),
+        }),
+    );
+    picker.update(cx, |picker, cx| {
+        picker.favorites = vec![favorite.clone()];
+        picker.filter_open = true;
+        picker.reduced_motion = true;
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let favorite_row = cx
+        .debug_bounds("picker-favorite-0")
+        .expect("favorite row should remain visible behind the dropdown");
+    let position = point(
+        favorite_row.left() + px(10.0),
+        favorite_row.top() + px(10.0),
+    );
+    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+
+    cx.read(|cx| {
+        let picker = picker.read(cx);
+        assert!(!picker.filter_open);
+        assert_eq!(picker.current_dir, favorite);
+    });
 }

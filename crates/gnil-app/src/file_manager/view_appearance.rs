@@ -130,6 +130,9 @@ impl FileManager {
             .shadow_lg()
             .occlude()
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                this.dismiss_appearance_menu(cx);
+            }))
             .flex()
             .flex_col()
             .gap_3()

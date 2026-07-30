@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use gpui::{Animation, AnimationExt as _, AnyElement, IntoElement, Styled, px};
 
-pub(crate) const BACKDROP_PRIORITY: usize = 9;
 pub(crate) const MENU_PRIORITY: usize = 10;
 pub(crate) const PATH_MENU_PRIORITY: usize = 11;
 pub(crate) const APPEARANCE_PRIORITY: usize = 12;

@@ -332,13 +332,6 @@ impl Render for FileManager {
             .text_color(rgb(text_emphasized()))
             .child(self.render_workspace(cx))
             .child(self.surfaces.rubber_band())
-            .when(
-                self.action_menu.is_some()
-                    || self.empty_space_menu.is_some()
-                    || self.appearance_menu_open
-                    || self.command_bar_menu.is_some(),
-                |root| root.child(Self::render_context_menu_backdrop(cx)),
-            )
             .when(self.empty_space_menu.is_some(), |root| {
                 root.child(self.render_empty_space_menu(window, cx))
             })

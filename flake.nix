@@ -40,6 +40,11 @@
               environment.systemPackages = [ cfg.package ];
             }
             (lib.mkIf cfg.portal.enable {
+              # xdg-document-portal shells out to fusermount3 when exporting a selected file to
+              # sandboxed callers such as browsers. Minimal NixOS profiles do not enable the FUSE
+              # wrapper by default, which makes the document portal fail and callers retry the
+              # FileChooser request.
+              programs.fuse.enable = lib.mkDefault true;
               programs.niri.useNautilus = lib.mkDefault false;
               xdg.portal = {
                 enable = true;

@@ -72,6 +72,12 @@ struct SuggestedName {
     raw: Option<OsString>,
 }
 
+fn stable_picker_path_id(path: &Path) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn picker_filters(
     filters: &[PortalFilter],
     current_filter: Option<&PortalFilter>,

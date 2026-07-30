@@ -223,6 +223,7 @@ impl FileManager {
         } else {
             self.cancel_preview_request();
         }
+        self.invalidate_surfaces(SurfaceMask::COMMAND_BAR | SurfaceMask::FILE_LIST, cx);
         cx.notify();
     }
 
@@ -515,16 +516,16 @@ impl FileManager {
     }
 
     fn toggle_appearance(&mut self, _: &ToggleAppearance, _: &mut Window, cx: &mut Context<Self>) {
-        if self.appearance_menu_open && !self.appearance_menu_closing {
+        if self.appearance_menu_open {
             self.dismiss_appearance_menu(cx);
-        } else {
-            self.action_menu = None;
-            self.empty_space_menu = None;
-            self.command_bar_menu = None;
-            self.appearance_menu_open = true;
-            self.appearance_menu_closing = false;
-            cx.notify();
+            return;
         }
+        self.action_menu = None;
+        self.empty_space_menu = None;
+        self.command_bar_menu = None;
+        self.appearance_menu_open = true;
+        self.appearance_menu_closing = false;
+        cx.notify();
     }
 
     fn toggle_settings(&mut self, _: &ToggleSettings, window: &mut Window, cx: &mut Context<Self>) {
@@ -562,6 +563,9 @@ impl FileManager {
         self.preview_visible = self.settings.preview_enabled;
         self.auto_mount_removable = self.settings.auto_mount_removable;
         self.reduced_motion = self.settings.reduced_motion;
+        if self.preview_visible != preview_was_visible {
+            self.invalidate_surfaces(SurfaceMask::COMMAND_BAR | SurfaceMask::FILE_LIST, cx);
+        }
         self.preview_cache
             .lock()
             .expect("preview cache lock poisoned")
@@ -971,7 +975,7 @@ impl FileManager {
                 && menu.animation != MenuAnimationState::Closing
             {
                 menu.move_focus(&items, 1);
-                cx.notify();
+                self.invalidate_surfaces(SurfaceMask::COMMAND_BAR, cx);
             }
         } else if let Some(menu) = self.empty_space_menu.as_mut()
             && menu.animation != MenuAnimationState::Closing
@@ -997,7 +1001,7 @@ impl FileManager {
                 && menu.animation != MenuAnimationState::Closing
             {
                 menu.move_focus(&items, -1);
-                cx.notify();
+                self.invalidate_surfaces(SurfaceMask::COMMAND_BAR, cx);
             }
         } else if let Some(menu) = self.empty_space_menu.as_mut()
             && menu.animation != MenuAnimationState::Closing
@@ -1023,7 +1027,7 @@ impl FileManager {
                 && menu.animation != MenuAnimationState::Closing
             {
                 menu.focus_first(&items);
-                cx.notify();
+                self.invalidate_surfaces(SurfaceMask::COMMAND_BAR, cx);
             }
         } else if let Some(menu) = self.empty_space_menu.as_mut()
             && menu.animation != MenuAnimationState::Closing
@@ -1049,7 +1053,7 @@ impl FileManager {
                 && menu.animation != MenuAnimationState::Closing
             {
                 menu.focus_last(&items);
-                cx.notify();
+                self.invalidate_surfaces(SurfaceMask::COMMAND_BAR, cx);
             }
         } else if let Some(menu) = self.empty_space_menu.as_mut()
             && menu.animation != MenuAnimationState::Closing
@@ -1264,10 +1268,18 @@ impl FileManager {
         kind: CommandBarMenuKind,
         cx: &mut Context<Self>,
     ) {
-        if self.command_bar_menu.as_ref().is_some_and(|menu| {
-            menu.kind == kind && menu.animation != MenuAnimationState::Closing
-        }) {
-            self.dismiss_command_bar_menu(cx);
+        if self
+            .command_bar_menu
+            .as_ref()
+            .is_some_and(|menu| menu.kind == kind)
+        {
+            if self
+                .command_bar_menu
+                .as_ref()
+                .is_some_and(|menu| menu.animation != MenuAnimationState::Closing)
+            {
+                self.dismiss_command_bar_menu(cx);
+            }
             return;
         }
         self.action_menu = None;
@@ -1280,7 +1292,7 @@ impl FileManager {
             &items,
             self.command_bar_menu_serial,
         ));
-        cx.notify();
+        self.invalidate_surfaces(SurfaceMask::COMMAND_BAR, cx);
     }
 
     fn dismiss_command_bar_menu(&mut self, cx: &mut Context<Self>) {
@@ -1292,7 +1304,7 @@ impl FileManager {
         }
         menu.animation = MenuAnimationState::Closing;
         let serial = menu.serial;
-        cx.notify();
+        self.invalidate_surfaces(SurfaceMask::COMMAND_BAR, cx);
         let timer = cx.background_executor().timer(Duration::from_millis(80));
         cx.spawn(async move |this, cx| {
             timer.await;
@@ -1301,7 +1313,7 @@ impl FileManager {
                     menu.serial == serial && menu.animation == MenuAnimationState::Closing
                 }) {
                     this.command_bar_menu = None;
-                    cx.notify();
+                    this.invalidate_surfaces(SurfaceMask::COMMAND_BAR, cx);
                 }
             });
         })
@@ -1315,6 +1327,7 @@ impl FileManager {
         cx: &mut Context<Self>,
     ) {
         self.command_bar_menu = None;
+        self.invalidate_surfaces(SurfaceMask::COMMAND_BAR, cx);
         match command {
             CommandBarCommand::Cut => self.cut_selected(&CutSelected, window, cx),
             CommandBarCommand::Copy => self.copy_selected(&CopySelected, window, cx),

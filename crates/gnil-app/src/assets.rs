@@ -56,6 +56,7 @@ asset_registry! {
     "icons/action-new.svg" => "../../../assets/icons/action-new.svg",
     "icons/action-sort.svg" => "../../../assets/icons/action-sort.svg",
     "icons/action-layout-grid.svg" => "../../../assets/icons/action-layout-grid.svg",
+    "icons/action-panel-right.svg" => "../../../assets/icons/action-panel-right.svg",
     "icons/action-more.svg" => "../../../assets/icons/action-more.svg",
     "icons/action-restore.svg" => "../../../assets/icons/action-restore.svg",
     "icons/action-cut.svg" => "../../../assets/icons/action-cut.svg",

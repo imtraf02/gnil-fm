@@ -47,8 +47,8 @@ use crate::theme_runtime::{
 use crate::ui::control::FocusableControl;
 use crate::ui::icon::{IconSize, IconTone, ui_icon};
 use crate::ui::overlay::{
-    APPEARANCE_PRIORITY, BACKDROP_PRIORITY, MENU_PRIORITY, MODAL_PRIORITY, OverlayMotionState,
-    PATH_MENU_PRIORITY, animate_overlay,
+    APPEARANCE_PRIORITY, MENU_PRIORITY, MODAL_PRIORITY, OverlayMotionState, PATH_MENU_PRIORITY,
+    animate_overlay,
 };
 
 use chrono::{DateTime, Local};
@@ -904,12 +904,12 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionMenuPlacement, ActionMenuState, ActivateFileSearch, EmptySpaceMenuCapabilities,
-        EmptySpaceMenuContext, EmptySpaceMenuState, EmptySpaceSubmenu, EmptySpaceViewState,
-        FileManager, FileSearchScope, HandleEscape, MenuContext, OpenRename, OperationSheet,
-        PointerInteraction, ToggleFavorite, ToggleSettings, breadcrumb_segments,
-        favorite_availability, format_bytes, place_is_active, resolve_theme_appearance, size_label,
-        visible_breadcrumb_segments,
+        ActionMenuPlacement, ActionMenuState, ActivateFileSearch, CommandBarMenuKind,
+        EmptySpaceMenuCapabilities, EmptySpaceMenuContext, EmptySpaceMenuState, EmptySpaceSubmenu,
+        EmptySpaceViewState, FileManager, FileSearchScope, HandleEscape, MenuAnimationState,
+        MenuContext, OpenRename, OperationSheet, PointerInteraction, ToggleFavorite,
+        ToggleSettings, breadcrumb_segments, favorite_availability, format_bytes, place_is_active,
+        resolve_theme_appearance, size_label, visible_breadcrumb_segments,
     };
     use gnil_core::{
         ConfigPaths, DirectoryLoadPhase, DirectorySnapshot, EntryMetadata, FileEntry, FileKind,
@@ -1295,6 +1295,76 @@ mod tests {
             Modifiers::none(),
         );
         assert!(!cx.read(|cx| manager.read(cx).file_search.open));
+    }
+
+    #[gpui::test]
+    fn action_menu_does_not_block_an_outside_file_click(cx: &mut TestAppContext) {
+        let (manager, cx) = cx.add_window_view(|_, cx| {
+            let mut manager = FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx);
+            manager.snapshot = test_snapshot(2);
+            manager.selection.select_only(1, &manager.snapshot.entries);
+            manager.action_menu_serial = 1;
+            manager.action_menu = Some(ActionMenuState::new(
+                ActionMenuPlacement::Cursor(point(px(640.0), px(420.0))),
+                MenuContext {
+                    selected_count: 1,
+                    ..MenuContext::default()
+                },
+                manager.action_menu_serial,
+            ));
+            manager
+        });
+        cx.run_until_parked();
+
+        let row = cx
+            .debug_bounds("details-row-0")
+            .expect("the first file row should be visible outside the menu");
+        let position = point(row.left() + px(12.0), row.top() + px(12.0));
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+
+        assert!(cx.read(|cx| {
+            let manager = manager.read(cx);
+            manager
+                .selection
+                .contains_path(Path::new("/tmp/file-0.txt"))
+                && manager
+                    .action_menu
+                    .as_ref()
+                    .is_some_and(|menu| menu.animation == MenuAnimationState::Closing)
+        }));
+
+        cx.executor().advance_clock(Duration::from_millis(81));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| manager.read(cx).action_menu.is_none()));
+    }
+
+    #[gpui::test]
+    fn clicking_an_open_command_menu_trigger_does_not_reopen_it(cx: &mut TestAppContext) {
+        let (manager, cx) = cx.add_window_view(|_, cx| {
+            FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx)
+        });
+        manager.update(cx, |manager, cx| {
+            manager.toggle_command_bar_menu(CommandBarMenuKind::Sort, cx);
+        });
+        assert!(cx.read(|cx| manager.read(cx).command_bar_menu.is_some()));
+
+        manager.update(cx, |manager, cx| {
+            // The menu receives pointer-down-out before the trigger's click handler.
+            manager.dismiss_command_bar_menu(cx);
+            manager.toggle_command_bar_menu(CommandBarMenuKind::Sort, cx);
+        });
+        assert!(cx.read(|cx| {
+            manager
+                .read(cx)
+                .command_bar_menu
+                .as_ref()
+                .is_some_and(|menu| menu.animation == MenuAnimationState::Closing)
+        }));
+
+        cx.executor().advance_clock(Duration::from_millis(81));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| manager.read(cx).command_bar_menu.is_none()));
     }
 
     #[gpui::test]
@@ -1922,5 +1992,69 @@ mod tests {
             expanded_list.size.width - list_with_preview.size.width,
             preview.size.width
         );
+    }
+
+    #[gpui::test]
+    fn preview_toolbar_button_toggles_the_right_panel(cx: &mut TestAppContext) {
+        let (manager, cx) = cx.add_window_view(|_, cx| {
+            let mut manager = FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx);
+            manager.preview_visible = false;
+            manager
+        });
+        cx.run_until_parked();
+
+        let toggle = cx
+            .debug_bounds("preview-panel-toggle")
+            .expect("preview panel toggle should be visible at the right edge of the toolbar");
+        let command_bar = cx.read(|cx| manager.read(cx).surfaces.command_bar.clone());
+        let renders_before = cx.read(|cx| command_bar.read(cx).render_count);
+        let position = point(toggle.left() + px(12.0), toggle.top() + px(12.0));
+
+        cx.simulate_click(position, Modifiers::none());
+        assert!(cx.read(|cx| manager.read(cx).preview_visible));
+        let preview = cx
+            .debug_bounds("preview-surface")
+            .expect("preview panel should be laid out after enabling it");
+        assert!(cx.read(|cx| command_bar.read(cx).render_count) > renders_before);
+
+        cx.simulate_click(position, Modifiers::none());
+        assert!(!cx.read(|cx| manager.read(cx).preview_visible));
+        let expanded_list = cx
+            .debug_bounds("file-list-surface-frame")
+            .expect("file list should expand after hiding the preview panel");
+        assert_eq!(expanded_list.right(), preview.right());
+    }
+
+    #[gpui::test]
+    fn command_bar_menu_is_attached_to_its_trigger_without_an_icon_gutter(cx: &mut TestAppContext) {
+        let (manager, cx) = cx.add_window_view(|_, cx| {
+            let mut manager = FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx);
+            manager.reduced_motion = true;
+            manager
+        });
+        cx.simulate_resize(size(px(800.0), px(600.0)));
+        cx.run_until_parked();
+        manager.update(cx, |manager, cx| {
+            manager.toggle_command_bar_menu(CommandBarMenuKind::Sort, cx);
+        });
+        cx.run_until_parked();
+
+        let trigger = cx
+            .debug_bounds("command-bar-menu-trigger-Sort")
+            .expect("Sort trigger should be rendered");
+        let panel = cx
+            .debug_bounds("command-bar-menu-panel-Sort")
+            .expect("Sort menu should be rendered");
+        let first_label = cx
+            .debug_bounds("command-bar-menu-label-Sort-0")
+            .expect("first Sort menu label should be rendered");
+
+        assert_eq!(
+            panel.top(),
+            trigger.bottom(),
+            "trigger={trigger:?}, panel={panel:?}, first_label={first_label:?}"
+        );
+        assert_eq!(panel.left() + px(5.0), trigger.left());
+        assert_eq!(first_label.left(), trigger.left() + px(8.0));
     }
 }
