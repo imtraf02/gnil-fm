@@ -322,6 +322,169 @@ impl ImageCache for RetainAllImageCache {
     }
 }
 
+struct LruImageCacheEntry {
+    item: ImageCacheItem,
+    last_used: u64,
+    weight: usize,
+}
+
+/// A byte-bounded LRU image cache. Loaded CPU/GPU images are released together on eviction.
+pub struct LruImageCache {
+    entries: HashMap<u64, LruImageCacheEntry>,
+    capacity: usize,
+    used: usize,
+    clock: u64,
+}
+
+impl fmt::Debug for LruImageCache {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LruImageCache")
+            .field("num_images", &self.entries.len())
+            .field("capacity", &self.capacity)
+            .field("used", &self.used)
+            .finish()
+    }
+}
+
+impl LruImageCache {
+    /// Create an image cache with a decoded-byte capacity.
+    pub fn new(capacity: usize, cx: &mut App) -> Entity<Self> {
+        let entity = cx.new(|_| Self {
+            entries: HashMap::new(),
+            capacity,
+            used: 0,
+            clock: 0,
+        });
+        cx.observe_release(&entity, |cache, cx| {
+            for (_, mut entry) in std::mem::take(&mut cache.entries) {
+                if let Some(Ok(image)) = entry.item.get() {
+                    cx.drop_image(image, None);
+                }
+            }
+        })
+        .detach();
+        entity
+    }
+
+    fn image_weight(image: &RenderImage) -> usize {
+        (0..image.frame_count())
+            .filter_map(|index| image.as_bytes(index).map(<[u8]>::len))
+            .fold(0, usize::saturating_add)
+    }
+
+    fn evict(&mut self, protected: u64, window: &mut Window, cx: &mut App) {
+        while self.used > self.capacity && self.entries.len() > 1 {
+            let Some(candidate) = self
+                .entries
+                .iter()
+                .filter(|(hash, _)| **hash != protected)
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(hash, _)| *hash)
+            else {
+                break;
+            };
+            if let Some(mut entry) = self.entries.remove(&candidate) {
+                self.used = self.used.saturating_sub(entry.weight);
+                if let Some(Ok(image)) = entry.item.get() {
+                    cx.drop_image(image, Some(window));
+                }
+            }
+        }
+    }
+
+    /// Load an image and mark it as most recently used.
+    pub fn load(
+        &mut self,
+        source: &Resource,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        let source_hash = hash(source);
+        self.clock = self.clock.wrapping_add(1);
+        if let Some(entry) = self.entries.get_mut(&source_hash) {
+            entry.last_used = self.clock;
+            let result = entry.item.get();
+            if entry.weight == 0 {
+                entry.weight = result
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map_or(1, |image| Self::image_weight(image));
+                self.used = self.used.saturating_add(entry.weight);
+            }
+            self.evict(source_hash, window, cx);
+            return result;
+        }
+
+        let future = AssetLogger::<ImageAssetLoader>::load(source.clone(), cx);
+        let task = cx.background_executor().spawn(future).shared();
+        self.entries.insert(
+            source_hash,
+            LruImageCacheEntry {
+                item: ImageCacheItem::Loading(task.clone()),
+                last_used: self.clock,
+                weight: 0,
+            },
+        );
+        let entity = window.current_view();
+        window
+            .spawn(cx, async move |cx| {
+                _ = task.await;
+                cx.on_next_frame(move |_, cx| cx.notify(entity));
+            })
+            .detach();
+        None
+    }
+
+    /// Remove all cached images.
+    pub fn clear(&mut self, window: &mut Window, cx: &mut App) {
+        for (_, mut entry) in std::mem::take(&mut self.entries) {
+            if let Some(Ok(image)) = entry.item.get() {
+                cx.drop_image(image, Some(window));
+            }
+        }
+        self.used = 0;
+    }
+}
+
+impl ImageCache for LruImageCache {
+    fn load(
+        &mut self,
+        resource: &Resource,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        LruImageCache::load(self, resource, window, cx)
+    }
+}
+
+/// Constructs a decoded-byte-bounded LRU image cache associated with an element ID.
+pub fn bounded_image_cache(id: impl Into<ElementId>, capacity: usize) -> LruImageCacheProvider {
+    LruImageCacheProvider {
+        id: id.into(),
+        capacity,
+    }
+}
+
+/// Provides a byte-bounded LRU cache during element rendering.
+pub struct LruImageCacheProvider {
+    id: ElementId,
+    capacity: usize,
+}
+
+impl ImageCacheProvider for LruImageCacheProvider {
+    fn provide(&mut self, window: &mut Window, cx: &mut App) -> AnyImageCache {
+        window
+            .with_global_id(self.id.clone(), |global_id, window| {
+                window.with_element_state::<Entity<LruImageCache>, _>(global_id, |cache, _| {
+                    let cache = cache.unwrap_or_else(|| LruImageCache::new(self.capacity, cx));
+                    (cache.clone(), cache)
+                })
+            })
+            .into()
+    }
+}
+
 /// Constructs a retain-all image cache that uses the element state associated with the given ID.
 pub fn retain_all(id: impl Into<ElementId>) -> RetainAllImageCacheProvider {
     RetainAllImageCacheProvider { id: id.into() }

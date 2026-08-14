@@ -147,14 +147,17 @@ fn picker_places() -> Vec<(String, PathBuf)> {
     places
 }
 
-fn recent_entries() -> Vec<FileEntry> {
-    let Some(data_dir) = dirs::data_dir() else {
-        return Vec::new();
-    };
-    let Ok(source) = fs::read(data_dir.join("recently-used.xbel")) else {
-        return Vec::new();
-    };
-    let mut reader = Reader::from_reader(source.as_slice());
+const MAX_RECENT_XBEL_BYTES: u64 = 4 * 1024 * 1024;
+
+fn read_recent_source(path: &Path) -> io::Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
+    let mut source = Vec::new();
+    file.take(MAX_RECENT_XBEL_BYTES).read_to_end(&mut source)?;
+    Ok(source)
+}
+
+fn recent_paths_from_source(source: &[u8]) -> Vec<PathBuf> {
+    let mut reader = Reader::from_reader(source);
     reader.config_mut().trim_text(true);
     let mut paths = Vec::new();
     loop {
@@ -164,7 +167,11 @@ fn recent_entries() -> Vec<FileEntry> {
                     .attributes()
                     .filter_map(Result::ok)
                     .find(|attribute| attribute.key.as_ref() == b"href")
-                    .and_then(|attribute| attribute.unescape_value().ok())
+                    .and_then(|attribute| {
+                        attribute
+                            .normalized_value(XmlVersion::Implicit1_0)
+                            .ok()
+                    })
                     .and_then(|href| Url::parse(&href).ok())
                     .and_then(|uri| uri.to_file_path().ok())
                 {
@@ -178,8 +185,18 @@ fn recent_entries() -> Vec<FileEntry> {
             _ => {}
         }
     }
-    let mut seen = HashSet::new();
     paths
+}
+
+fn recent_entries() -> Vec<FileEntry> {
+    let Some(data_dir) = dirs::data_dir() else {
+        return Vec::new();
+    };
+    let Ok(source) = read_recent_source(&data_dir.join("recently-used.xbel")) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    recent_paths_from_source(&source)
         .into_iter()
         .filter(|path| seen.insert(path.clone()))
         .filter_map(|path| entry_from_path(&path))
@@ -315,6 +332,35 @@ fn nav_button(icon: &'static str, enabled: bool) -> gpui::Div {
             IconSize::Small,
             if enabled {
                 IconTone::Default
+            } else {
+                IconTone::Muted
+            },
+        ))
+}
+
+fn picker_layout_button(
+    id: &'static str,
+    icon: &'static str,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .with_focus_ring()
+        .h_full()
+        .w_9()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .when(selected, |button| button.bg(rgb(accent_background())))
+        .when(!selected, |button| {
+            button.hover(|style| style.bg(rgb(surface_elevated())))
+        })
+        .child(ui_icon(
+            icon,
+            IconSize::Small,
+            if selected {
+                IconTone::Accent
             } else {
                 IconTone::Muted
             },

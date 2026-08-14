@@ -1,4 +1,9 @@
-use std::{collections::HashMap, sync::mpsc, thread, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::Duration,
+};
 
 use async_io::Timer;
 use futures_lite::future;
@@ -19,10 +24,44 @@ use crate::{
 const BUS_NAME: &str = "org.freedesktop.impl.portal.desktop.gnilfm";
 const DESKTOP_PATH: &str = "/org/freedesktop/portal/desktop";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const MAX_ACTIVE_REQUESTS: usize = 8;
+const MAX_ACTIVE_REQUESTS_PER_APP: usize = 2;
+const UI_CHANNEL_CAPACITY: usize = 16;
 
 #[derive(Clone)]
 struct FileChooserBackend {
     ui: async_channel::Sender<PickerUiCommand>,
+    quota: Arc<Mutex<PortalQuota>>,
+}
+
+#[derive(Default)]
+struct PortalQuota {
+    total: usize,
+    per_app: HashMap<String, usize>,
+}
+
+struct PortalPermit {
+    quota: Arc<Mutex<PortalQuota>>,
+    app_id: String,
+}
+
+impl Drop for PortalPermit {
+    fn drop(&mut self) {
+        let Ok(mut quota) = self.quota.lock() else {
+            return;
+        };
+        quota.total = quota.total.saturating_sub(1);
+        let remove_app = if let Some(count) = quota.per_app.get_mut(&self.app_id) {
+            *count = count.saturating_sub(1);
+            *count == 0
+        } else {
+            false
+        };
+        if remove_app {
+            quota.per_app.remove(&self.app_id);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -139,6 +178,20 @@ impl FileChooserBackend {
 }
 
 impl FileChooserBackend {
+    fn try_acquire(&self, app_id: &str) -> Option<PortalPermit> {
+        let mut quota = self.quota.lock().ok()?;
+        let app_count = quota.per_app.get(app_id).copied().unwrap_or(0);
+        if quota.total >= MAX_ACTIVE_REQUESTS || app_count >= MAX_ACTIVE_REQUESTS_PER_APP {
+            return None;
+        }
+        quota.total += 1;
+        *quota.per_app.entry(app_id.to_owned()).or_default() += 1;
+        Some(PortalPermit {
+            quota: Arc::clone(&self.quota),
+            app_id: app_id.to_owned(),
+        })
+    }
+
     async fn run_request(
         &self,
         request: PickerRequest,
@@ -146,6 +199,12 @@ impl FileChooserBackend {
         object_server: &ObjectServer,
         include_writable: bool,
     ) -> (u32, HashMap<String, OwnedValue>) {
+        if request.validate().is_err() {
+            return error_result();
+        }
+        let Some(_permit) = self.try_acquire(&request.app_id) else {
+            return error_result();
+        };
         let (cancel_tx, cancel_rx) = async_channel::bounded(1);
         let request_object = PortalRequestObject { cancel: cancel_tx };
         match object_server.at(handle.clone(), request_object).await {
@@ -178,6 +237,7 @@ impl FileChooserBackend {
             response_rx,
             started_rx,
             STARTUP_TIMEOUT,
+            REQUEST_TIMEOUT,
         )
         .await;
 
@@ -195,6 +255,7 @@ async fn await_picker(
     response_rx: async_channel::Receiver<PickerOutcome>,
     started_rx: async_channel::Receiver<Result<(), String>>,
     startup_timeout: Duration,
+    request_timeout: Duration,
 ) -> PickerOutcome {
     let startup = future::or(
         async {
@@ -226,11 +287,18 @@ async fn await_picker(
                         PickerOutcome::Failed("picker UI channel closed".into())
                     })
                 },
-                async {
-                    let _ = cancel_rx.recv().await;
-                    close_picker(ui, handle.to_owned()).await;
-                    PickerOutcome::Cancelled
-                },
+                future::or(
+                    async {
+                        let _ = cancel_rx.recv().await;
+                        close_picker(ui, handle.to_owned()).await;
+                        PickerOutcome::Cancelled
+                    },
+                    async {
+                        Timer::after(request_timeout).await;
+                        close_picker(ui, handle.to_owned()).await;
+                        PickerOutcome::Failed("picker request timed out".into())
+                    },
+                ),
             )
             .await
         }
@@ -285,7 +353,7 @@ where
 }
 
 pub fn run() -> anyhow::Result<()> {
-    let (ui_tx, ui_rx) = async_channel::unbounded();
+    let (ui_tx, ui_rx) = async_channel::bounded(UI_CHANNEL_CAPACITY);
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("gnil-filechooser-dbus".into())
@@ -316,7 +384,10 @@ async fn run_dbus(
     ui: async_channel::Sender<PickerUiCommand>,
     ready: mpsc::SyncSender<Result<(), String>>,
 ) -> anyhow::Result<()> {
-    let backend = FileChooserBackend { ui };
+    let backend = FileChooserBackend {
+        ui,
+        quota: Arc::new(Mutex::new(PortalQuota::default())),
+    };
     let connection = zbus::connection::Builder::session()?
         .name(BUS_NAME)?
         .serve_at(DESKTOP_PATH, backend)?
@@ -380,6 +451,56 @@ mod tests {
     }
 
     #[test]
+    fn quota_limits_total_and_per_application_requests() {
+        let (ui, _commands) = async_channel::bounded(1);
+        let backend = FileChooserBackend {
+            ui,
+            quota: Arc::new(Mutex::new(PortalQuota::default())),
+        };
+        let first = backend.try_acquire("app.one").unwrap();
+        let second = backend.try_acquire("app.one").unwrap();
+        assert!(backend.try_acquire("app.one").is_none());
+
+        let mut others = Vec::new();
+        for index in 0..MAX_ACTIVE_REQUESTS - 2 {
+            others.push(backend.try_acquire(&format!("app.{index}")).unwrap());
+        }
+        assert!(backend.try_acquire("app.extra").is_none());
+        drop(first);
+        assert!(backend.try_acquire("app.extra").is_some());
+        drop(second);
+        drop(others);
+    }
+
+    #[test]
+    fn active_picker_is_closed_after_request_timeout() {
+        zbus::block_on(async {
+            let (ui, commands) = async_channel::bounded(1);
+            let (_cancel, cancel_rx) = async_channel::bounded(1);
+            let (_response, response_rx) = async_channel::bounded(1);
+            let (started, started_rx) = async_channel::bounded(1);
+            started.send(Ok(())).await.unwrap();
+
+            let outcome = await_picker(
+                &ui,
+                "/request/timeout",
+                cancel_rx,
+                response_rx,
+                started_rx,
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+            )
+            .await;
+
+            assert!(matches!(outcome, PickerOutcome::Failed(error) if error.contains("timed out")));
+            assert!(matches!(
+                commands.recv().await,
+                Ok(PickerUiCommand::Close { handle }) if handle == "/request/timeout"
+            ));
+        });
+    }
+
+    #[test]
     fn startup_failure_closes_only_its_picker() {
         zbus::block_on(async {
             let (ui, commands) = async_channel::unbounded();
@@ -394,6 +515,7 @@ mod tests {
                 cancel_rx,
                 response_rx,
                 started_rx,
+                Duration::from_secs(1),
                 Duration::from_secs(1),
             )
             .await;
@@ -442,6 +564,7 @@ mod tests {
                 response_rx_a,
                 started_rx_a,
                 Duration::from_secs(1),
+                Duration::from_secs(1),
             );
             let second = await_picker(
                 &ui,
@@ -449,6 +572,7 @@ mod tests {
                 cancel_rx_b,
                 response_rx_b,
                 started_rx_b,
+                Duration::from_secs(1),
                 Duration::from_secs(1),
             );
             let (first, second) = future::zip(first, second).await;

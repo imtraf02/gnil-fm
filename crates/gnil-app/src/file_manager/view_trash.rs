@@ -96,10 +96,10 @@ impl FileManager {
                                         cx.stop_propagation();
                                     }),
                                 )
-                                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                                     this.select_from_click(index, event, true, cx);
                                     if event.click_count() >= 2 {
-                                        this.open_index(index, cx);
+                                        this.open_index(index, window, cx);
                                     }
                                 }))
                                 .child(

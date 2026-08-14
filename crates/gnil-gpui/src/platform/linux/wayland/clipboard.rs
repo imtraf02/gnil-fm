@@ -4,6 +4,7 @@ use std::{
     fs::File,
     io::{ErrorKind, Write},
     os::fd::{AsRawFd, BorrowedFd, OwnedFd},
+    time::Duration,
 };
 
 use calloop::{LoopHandle, PostAction};
@@ -14,7 +15,7 @@ use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection
 
 use crate::{
     ClipboardEntry, ClipboardItem, Image, ImageFormat, WaylandClientStatePtr, hash,
-    platform::linux::platform::read_fd,
+    platform::linux::platform::read_fd_bounded,
 };
 
 /// Text mime types that we'll offer to other programs.
@@ -24,6 +25,11 @@ pub(crate) const FILE_LIST_MIME_TYPE: &str = "text/uri-list";
 
 /// Text mime types that we'll accept from other programs.
 pub(crate) const ALLOWED_TEXT_MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "UTF8_STRING"];
+pub(crate) const MAX_TEXT_TRANSFER_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_TRANSFER_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const TRANSFER_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_OFFER_MIME_TYPES: usize = 64;
+const MAX_MIME_TYPE_BYTES: usize = 256;
 
 pub(crate) struct Clipboard {
     connection: Connection,
@@ -73,24 +79,39 @@ impl<T: ReceiveData> DataOffer<T> {
     }
 
     pub fn add_mime_type(&mut self, mime_type: String) {
-        self.mime_types.push(mime_type)
+        if mime_type.len() <= MAX_MIME_TYPE_BYTES
+            && self.mime_types.len() < MAX_OFFER_MIME_TYPES
+            && !self.mime_types.contains(&mime_type)
+        {
+            self.mime_types.push(mime_type);
+        }
     }
 
     pub(crate) fn has_mime_type(&self, mime_type: &str) -> bool {
         self.mime_types.iter().any(|t| t == mime_type)
     }
 
-    fn read_bytes(&self, connection: &Connection, mime_type: &str) -> Option<Vec<u8>> {
-        let pipe = Pipe::new().unwrap();
+    fn read_bytes(
+        &self,
+        connection: &Connection,
+        mime_type: &str,
+        max_bytes: usize,
+    ) -> Option<Vec<u8>> {
+        let pipe = Pipe::new()
+            .inspect_err(|error| log::error!("failed to create clipboard pipe: {error:?}"))
+            .ok()?;
         self.inner.receive_data(mime_type.to_string(), unsafe {
             BorrowedFd::borrow_raw(pipe.write.as_raw_fd())
         });
         let fd = pipe.read;
         drop(pipe.write);
 
-        connection.flush().unwrap();
+        if let Err(error) = connection.flush() {
+            log::error!("failed to flush clipboard request: {error:?}");
+            return None;
+        }
 
-        match unsafe { read_fd(fd) } {
+        match read_fd_bounded(fd, max_bytes, TRANSFER_TIMEOUT) {
             Ok(bytes) => Some(bytes),
             Err(err) => {
                 log::error!("error reading clipboard pipe: {err:?}");
@@ -105,7 +126,7 @@ impl<T: ReceiveData> DataOffer<T> {
                 .iter()
                 .any(|&allowed| allowed == mime_type)
         })?;
-        let bytes = self.read_bytes(connection, mime_type)?;
+        let bytes = self.read_bytes(connection, mime_type, MAX_TEXT_TRANSFER_BYTES)?;
         let text_content = match String::from_utf8(bytes) {
             Ok(content) => content,
             Err(e) => {
@@ -128,7 +149,7 @@ impl<T: ReceiveData> DataOffer<T> {
                 continue;
             }
 
-            if let Some(bytes) = self.read_bytes(connection, mime_type) {
+            if let Some(bytes) = self.read_bytes(connection, mime_type, MAX_IMAGE_TRANSFER_BYTES) {
                 let id = hash(&bytes);
                 return Some(ClipboardItem {
                     entries: vec![ClipboardEntry::Image(Image { format, bytes, id })],

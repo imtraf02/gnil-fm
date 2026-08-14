@@ -9,16 +9,16 @@ rust-version.workspace = true
 gnil-core = { path = "../gnil-core" }
 dirs.workspace = true
 image.workspace = true
+libc.workspace = true
 md-5 = "0.10.6"
 mime_guess.workspace = true
+nix.workspace = true
 png = "0.18.1"
 shlex = "1.3.0"
 syntect.workspace = true
 thiserror.workspace = true
-url.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true

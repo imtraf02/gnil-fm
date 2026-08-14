@@ -2,7 +2,6 @@ impl FileManager {
     // Sidebar groups stay together so their spacing and hierarchy remain visually auditable.
     #[allow(clippy::too_many_lines)]
     fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let operation_running = self.operation_running;
         let trash_target = DropTarget::Trash;
         let trash_predicate_target = trash_target.clone();
         let trash_move_target = trash_target.clone();
@@ -70,7 +69,7 @@ impl FileManager {
                             .when(!active, |style| style.text_color(rgb(theme_text())))
                             .hover(|style| style.bg(rgb(border())))
                             .can_drop(move |value, _, _| {
-                                can_drop_value(value, &predicate_target, operation_running)
+                                can_drop_value(value, &predicate_target)
                             })
                             .drag_over::<FileDragPayload>(|style, _, _, _| {
                                 style
@@ -271,7 +270,7 @@ impl FileManager {
                         let internal_drop_target = drop_target.clone();
                         let external_drop_target = drop_target;
                         row.can_drop(move |value, _, _| {
-                            can_drop_value(value, &predicate_target, operation_running)
+                            can_drop_value(value, &predicate_target)
                         })
                         .drag_over::<FileDragPayload>(|style, _, _, _| {
                             style
@@ -451,11 +450,7 @@ impl FileManager {
                         value
                             .downcast_ref::<FileDragPayload>()
                             .is_some_and(|payload| {
-                                can_internal_drop_value(
-                                    payload,
-                                    &trash_predicate_target,
-                                    operation_running,
-                                )
+                                can_internal_drop_value(payload, &trash_predicate_target)
                             })
                     })
                     .drag_over::<FileDragPayload>(|style, _, _, _| {

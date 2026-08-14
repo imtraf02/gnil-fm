@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, fmt::Write as _, path::PathBuf, rc::Rc, sync::Arc};
 
 use gnil_core::{DirectoryLoadPhase, DirectorySnapshot, EntryMetadata, FileEntry, FileKind};
 use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
@@ -154,6 +154,7 @@ fn picker_list_has_height_and_renders_scanned_entries(cx: &mut TestAppContext) {
         }),
     );
     picker.update(cx, |picker, cx| {
+        picker.file_layout = FileLayout::Details;
         picker.snapshot = Arc::new(DirectorySnapshot {
             generation: 1,
             path: PathBuf::from("/tmp"),
@@ -180,6 +181,52 @@ fn picker_list_has_height_and_renders_scanned_entries(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn picker_layout_selector_persists_the_grid_choice(cx: &mut TestAppContext) {
+    let config_root = tempdir().unwrap();
+    let config_paths = ConfigPaths {
+        config: config_root.path().join("config.toml"),
+        keymap: config_root.path().join("keymap.toml"),
+        session: config_root.path().join("session.json"),
+        cache: config_root.path().join("cache"),
+        journal: config_root.path().join("jobs.jsonl"),
+    };
+    let saved_paths = config_paths.clone();
+    let (picker, cx) = add_picker(
+        cx,
+        PickerRequestKind::Open(OpenFileOptions {
+            common: common(),
+            multiple: false,
+            directory: false,
+            filters: Vec::new(),
+            current_filter: None,
+        }),
+    );
+    picker.update(cx, |picker, cx| {
+        picker.config_paths = config_paths;
+        picker.file_layout = FileLayout::Details;
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let grid = cx
+        .debug_bounds("picker-layout-grid")
+        .expect("picker grid layout option should be rendered");
+    cx.simulate_click(
+        point(
+            grid.left() + grid.size.width / 2.0,
+            grid.top() + grid.size.height / 2.0,
+        ),
+        Modifiers::none(),
+    );
+
+    assert_eq!(cx.read(|cx| picker.read(cx).file_layout), FileLayout::Grid);
+    assert_eq!(
+        saved_paths.load_settings().unwrap().file_layout,
+        FileLayout::Grid
+    );
+}
+
+#[gpui::test]
 fn picker_sidebar_renders_configured_favorites(cx: &mut TestAppContext) {
     let favorite_root = tempdir().unwrap();
     let favorite = favorite_root.path().join("favorite");
@@ -203,6 +250,38 @@ fn picker_sidebar_renders_configured_favorites(cx: &mut TestAppContext) {
     assert!(
         cx.debug_bounds("picker-favorite-0").is_some(),
         "configured favorites should be visible in the picker sidebar"
+    );
+}
+
+#[test]
+fn recent_xbel_reader_caps_input_size() {
+    let temporary = tempdir().unwrap();
+    let path = temporary.path().join("recently-used.xbel");
+    std::fs::write(
+        &path,
+        vec![b'x'; usize::try_from(MAX_RECENT_XBEL_BYTES).unwrap() + 1024],
+    )
+    .unwrap();
+
+    let source = read_recent_source(&path).unwrap();
+
+    assert_eq!(
+        source.len(),
+        usize::try_from(MAX_RECENT_XBEL_BYTES).unwrap()
+    );
+}
+
+#[test]
+fn recent_xbel_handles_a_bookmark_with_many_attributes() {
+    let mut source = String::from("<xbel><bookmark");
+    for index in 0..512 {
+        write!(source, " data-{index}=\"value\"").unwrap();
+    }
+    source.push_str(" href=\"file:///tmp/report.txt\"></bookmark></xbel>");
+
+    assert_eq!(
+        recent_paths_from_source(source.as_bytes()),
+        [PathBuf::from("/tmp/report.txt")]
     );
 }
 

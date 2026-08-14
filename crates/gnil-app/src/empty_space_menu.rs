@@ -109,7 +109,7 @@ impl EmptySpaceMenuState {
         context: EmptySpaceMenuContext,
         serial: u64,
     ) -> Self {
-        let writes_enabled = !context.capabilities.operation_running;
+        let writes_enabled = true;
         let root_entries = vec![
             submenu(EmptySpaceSubmenu::New, "New", writes_enabled),
             action(
@@ -253,14 +253,14 @@ fn submenu_entries(
                 EmptySpaceMenuCommand::NewFolder,
                 "New Folder",
                 Some("Ctrl+Shift+N"),
-                !context.capabilities.operation_running,
+                true,
                 false,
             ),
             action(
                 EmptySpaceMenuCommand::NewFile,
                 "New File",
                 None,
-                !context.capabilities.operation_running,
+                true,
                 false,
             ),
         ],
@@ -458,9 +458,7 @@ mod tests {
         let mut menu = menu(context);
         assert_eq!(
             menu.focused_activation(),
-            Some(EmptySpaceMenuActivation::Command(
-                EmptySpaceMenuCommand::Refresh
-            ))
+            Some(EmptySpaceMenuActivation::Submenu(EmptySpaceSubmenu::New))
         );
         menu.move_focus(-1);
         assert_eq!(
@@ -473,9 +471,7 @@ mod tests {
         menu.move_focus(1);
         assert_eq!(
             menu.focused_activation(),
-            Some(EmptySpaceMenuActivation::Command(
-                EmptySpaceMenuCommand::Refresh
-            ))
+            Some(EmptySpaceMenuActivation::Submenu(EmptySpaceSubmenu::New))
         );
     }
 }

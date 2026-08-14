@@ -10,7 +10,7 @@ pub use thumbnail::{
 
 use std::{
     fs::{self, File},
-    io::{self, Read},
+    io::{self, BufReader, Read},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     time::UNIX_EPOCH,
@@ -26,7 +26,8 @@ use syntect::{
 use thiserror::Error;
 
 pub const INITIAL_TEXT_LIMIT: u64 = 2 * 1024 * 1024;
-pub const MAX_IMAGE_PIXELS: u64 = 50_000_000;
+pub const MAX_IMAGE_PIXELS: u64 = 16_000_000;
+pub const MAX_ENCODED_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewRequest {
@@ -82,6 +83,7 @@ pub struct ImagePreview {
     pub height: u32,
     pub format: String,
     pub decode_allowed: bool,
+    pub thumbnail_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -147,7 +149,16 @@ impl PreviewService {
                 &metadata,
             )));
         }
-        if let Ok(image) = image_dimensions(&request.path) {
+        if let Ok(mut image) = image_dimensions(&request.path) {
+            if image.decode_allowed {
+                image.thumbnail_path = ThumbnailService
+                    .thumbnail_cancellable(
+                        &ThumbnailRequest::preview(request.path.clone()),
+                        cancelled,
+                    )
+                    .ok()
+                    .map(|thumbnail| thumbnail.path);
+            }
             return Ok(PreviewResult::Image(image));
         }
         let mut file = File::open(&request.path)?;
@@ -255,8 +266,9 @@ fn color(color: Color) -> [u8; 4] {
 }
 
 fn image_dimensions(path: &Path) -> Result<ImagePreview, PreviewError> {
-    let reader = ImageReader::open(path)
-        .map_err(PreviewError::Io)?
+    let file = thumbnail::open_bounded_regular_file(path, MAX_ENCODED_IMAGE_BYTES)
+        .map_err(PreviewError::Io)?;
+    let reader = ImageReader::new(BufReader::new(file))
         .with_guessed_format()
         .map_err(PreviewError::Io)?;
     let format = reader
@@ -274,7 +286,10 @@ fn image_dimensions(path: &Path) -> Result<ImagePreview, PreviewError> {
             .copied()
             .unwrap_or("image")
             .to_owned(),
-        decode_allowed: u64::from(width) * u64::from(height) <= MAX_IMAGE_PIXELS,
+        decode_allowed: width <= 16_384
+            && height <= 16_384
+            && u64::from(width) * u64::from(height) <= MAX_IMAGE_PIXELS,
+        thumbnail_path: None,
     })
 }
 

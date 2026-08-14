@@ -12,7 +12,7 @@ use gnil_core::{
 };
 use ignore::WalkBuilder;
 
-use crate::scan_git_status;
+use crate::{mime::detect_mime_with_metadata, scan_git_status};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ScanOptions {
@@ -228,6 +228,15 @@ fn read_metadata(entry: &FileEntry) -> io::Result<FileMetadata> {
             classify_file_type(target.file_type())
         })
     });
+    let mime = if entry.kind == FileKind::File {
+        Some(detect_mime_with_metadata(&entry.path, &metadata))
+    } else if entry.kind == FileKind::Symlink && symlink_target_kind == Some(FileKind::File) {
+        fs::metadata(&entry.path)
+            .ok()
+            .map(|target| detect_mime_with_metadata(&entry.path, &target))
+    } else {
+        None
+    };
     Ok(FileMetadata {
         len: metadata.len(),
         // Match Thunar's fast path: listing a folder never recursively enumerates each child
@@ -238,13 +247,7 @@ fn read_metadata(entry: &FileEntry) -> io::Result<FileMetadata> {
         readonly: metadata.permissions().readonly(),
         symlink_target,
         symlink_target_kind,
-        mime: (entry.kind == FileKind::File)
-            .then(|| {
-                mime_guess::from_path(&entry.path)
-                    .first_raw()
-                    .map(str::to_owned)
-            })
-            .flatten(),
+        mime,
     })
 }
 

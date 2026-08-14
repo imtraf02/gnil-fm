@@ -14,11 +14,11 @@ pub use entry::{
     DirectoryLoadPhase, DirectorySnapshot, EntryMetadata, FileEntry, FileKind, FileMetadata,
     GitStatus, SortDirection, SortField, SortSpec, display_name, natural_cmp,
 };
-pub use job::{JobEvent, JobId, JobPriority, JobProgress, JobState};
+pub use job::{JobDecision, JobEvent, JobId, JobPriority, JobProgress, JobPrompt, JobState};
 pub use operation::{
     ConflictDecision, ExtractedEntryFingerprint, ExtractedEntryKind, ExtractedTreeFingerprint,
-    FileFingerprint, FsOperation, OperationOutcome, PermissionChange, PermissionUndo, RenamePair,
-    TrashEntryRef, UndoKind, UndoRecord,
+    FsOperation, OperationIssue, OperationOutcome, PermissionChange, PermissionUndo, RenamePair,
+    TrashEntryRef, TreeEntryFingerprint, TreeEntryKind, TreeFingerprint, UndoKind, UndoRecord,
 };
 pub use selection::{SelectionMerge, SelectionState};
 pub use settings::{

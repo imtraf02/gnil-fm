@@ -1,4 +1,23 @@
 impl Picker {
+    fn set_file_layout(&mut self, layout: FileLayout, cx: &mut Context<Self>) {
+        if self.file_layout == layout {
+            return;
+        }
+        self.file_layout = layout;
+        match self.config_paths.load_settings() {
+            Ok(mut settings) => {
+                settings.file_layout = layout;
+                if let Err(error) = self.config_paths.save_settings(&settings) {
+                    self.status = Some(format!("Could not save layout preference: {error}"));
+                }
+            }
+            Err(error) => {
+                self.status = Some(format!("Could not load layout preference: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         if !self.allows_multiple() {
             return;
@@ -9,6 +28,7 @@ impl Picker {
             .filter_map(|index| self.snapshot.entries.get(*index))
             .filter(|entry| self.entry_selectable(entry))
             .map(|entry| entry.path.clone())
+            .take(crate::portal_protocol::MAX_PORTAL_FILES)
             .collect();
         cx.notify();
     }
@@ -50,10 +70,15 @@ impl Picker {
                 .map(|entry| entry.path.clone())
                 .collect();
             for path in paths {
+                if self.selected.len() >= crate::portal_protocol::MAX_PORTAL_FILES {
+                    break;
+                }
                 self.selected.insert(path);
             }
         } else if self.allows_multiple() && (modifiers.control || modifiers.platform) {
-            if !self.selected.remove(&entry.path) {
+            if !self.selected.remove(&entry.path)
+                && self.selected.len() < crate::portal_protocol::MAX_PORTAL_FILES
+            {
                 self.selected.insert(entry.path.clone());
             }
             self.anchor = Some(index);
@@ -113,12 +138,15 @@ impl Picker {
                     paths.push(self.current_dir.clone());
                 }
                 paths.sort();
+                paths.truncate(crate::portal_protocol::MAX_PORTAL_FILES);
                 paths
             }
             PickerRequestKind::Open(options) => {
                 let mut paths: Vec<_> = self.selected.iter().cloned().collect();
                 paths.sort();
-                if !options.multiple {
+                if options.multiple {
+                    paths.truncate(crate::portal_protocol::MAX_PORTAL_FILES);
+                } else {
                     paths.truncate(1);
                 }
                 if paths.is_empty() {

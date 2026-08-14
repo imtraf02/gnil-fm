@@ -195,7 +195,7 @@ impl ActionMenuState {
     pub(crate) fn new(placement: ActionMenuPlacement, context: MenuContext, serial: u64) -> Self {
         let has_selection = context.selected_count > 0;
         let single_selection = context.selected_count == 1;
-        let writes_enabled = !context.operation_running;
+        let writes_enabled = true;
         let toolbar_actions = vec![
             toolbar_action(FileMenuCommand::Cut, "Cut", has_selection),
             toolbar_action(FileMenuCommand::Copy, "Copy", has_selection),
@@ -727,6 +727,7 @@ mod tests {
             desktop_file: PathBuf::from("/tmp/editor.desktop"),
             is_default: true,
             compatible: true,
+            declared_compatible: true,
         });
         menu.open_open_with_submenu(PathBuf::from("/tmp/file.txt"), "text/plain".into());
         let submenu = menu.open_with_submenu.as_ref().expect("open submenu");
@@ -776,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn symlinks_disable_permissions_and_operation_locks_writes() {
+    fn symlinks_disable_permissions_while_an_active_queue_keeps_writes_available() {
         let entries = entries();
         let mut selection = SelectionState::default();
         selection.select_only(2, &entries);
@@ -786,9 +787,9 @@ mod tests {
             &menu,
             FileMenuCommand::Permissions
         )));
-        assert!(!toolbar_action(&menu, FileMenuCommand::Paste).enabled);
-        assert!(!toolbar_action(&menu, FileMenuCommand::Rename).enabled);
-        assert!(!toolbar_action(&menu, FileMenuCommand::Trash).enabled);
+        assert!(toolbar_action(&menu, FileMenuCommand::Paste).enabled);
+        assert!(toolbar_action(&menu, FileMenuCommand::Rename).enabled);
+        assert!(toolbar_action(&menu, FileMenuCommand::Trash).enabled);
         assert!(toolbar_action(&menu, FileMenuCommand::Copy).enabled);
     }
 

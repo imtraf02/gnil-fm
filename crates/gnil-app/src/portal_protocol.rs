@@ -14,6 +14,19 @@ pub type PortalOptions = HashMap<String, OwnedValue>;
 pub type SerializedFilter = (String, Vec<(u32, String)>);
 pub type SerializedChoice = (String, String, Vec<(String, String)>, String);
 
+pub(crate) const MAX_PORTAL_FILES: usize = 256;
+const MAX_PORTAL_OPTIONS: usize = 64;
+const MAX_FILTERS: usize = 32;
+const MAX_FILTER_RULES: usize = 64;
+const MAX_CHOICES: usize = 32;
+const MAX_CHOICE_OPTIONS: usize = 128;
+const MAX_APP_ID_BYTES: usize = 255;
+const MAX_HANDLE_BYTES: usize = 512;
+const MAX_PARENT_HANDLE_BYTES: usize = 512;
+const MAX_TEXT_BYTES: usize = 1024;
+const MAX_PATH_BYTES: usize = 4096;
+const MAX_BASENAME_BYTES: usize = 255;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PickerRequestKind {
     Open(OpenFileOptions),
@@ -28,6 +41,19 @@ pub struct PickerRequest {
     pub parent_window: String,
     pub title: String,
     pub kind: PickerRequestKind,
+}
+
+impl PickerRequest {
+    pub fn validate(&self) -> Result<(), OptionError> {
+        bounded_nonempty("handle", &self.handle, MAX_HANDLE_BYTES)?;
+        bounded_nonempty("app_id", &self.app_id, MAX_APP_ID_BYTES)?;
+        bounded(
+            "parent_window",
+            &self.parent_window,
+            MAX_PARENT_HANDLE_BYTES,
+        )?;
+        bounded_nonempty("title", &self.title, MAX_TEXT_BYTES)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -117,6 +143,9 @@ impl PortalResponse {
                 choices,
                 current_filter,
             } => {
+                if paths.is_empty() || paths.len() > MAX_PORTAL_FILES {
+                    return Self::error();
+                }
                 let Some(uris) = paths
                     .iter()
                     .map(|path| file_uri(path))
@@ -124,9 +153,6 @@ impl PortalResponse {
                 else {
                     return Self::error();
                 };
-                if uris.is_empty() {
-                    return Self::error();
-                }
                 Self {
                     code: 0,
                     uris,
@@ -183,6 +209,7 @@ impl std::error::Error for OptionError {}
 
 impl OpenFileOptions {
     pub fn parse(options: &PortalOptions) -> Result<Self, OptionError> {
+        validate_option_map(options)?;
         let filters = parse_filters(options, "filters")?.unwrap_or_default();
         let requested_filter = parse_filter(options, "current_filter")?;
         let current_filter = select_current_filter(&filters, requested_filter);
@@ -198,12 +225,13 @@ impl OpenFileOptions {
 
 impl SaveFileOptions {
     pub fn parse(options: &PortalOptions) -> Result<Self, OptionError> {
+        validate_option_map(options)?;
         let filters = parse_filters(options, "filters")?.unwrap_or_default();
         let requested_filter = parse_filter(options, "current_filter")?;
         let current_filter = select_current_filter(&filters, requested_filter);
         Ok(Self {
             common: CommonOptions::parse(options)?,
-            current_name: option(options, "current_name")?,
+            current_name: bounded_option(options, "current_name", MAX_TEXT_BYTES)?,
             current_file: path_option(options, "current_file")?,
             filters,
             current_filter,
@@ -213,9 +241,12 @@ impl SaveFileOptions {
 
 impl SaveFilesOptions {
     pub fn parse(options: &PortalOptions) -> Result<Self, OptionError> {
+        validate_option_map(options)?;
         let raw: Vec<Vec<u8>> = required_option(options, "files")?;
-        if raw.is_empty() {
-            return Err(OptionError::new("files must contain at least one name"));
+        if raw.is_empty() || raw.len() > MAX_PORTAL_FILES {
+            return Err(OptionError::new(format!(
+                "files must contain between 1 and {MAX_PORTAL_FILES} names"
+            )));
         }
         let files = raw
             .iter()
@@ -231,7 +262,7 @@ impl SaveFilesOptions {
 impl CommonOptions {
     fn parse(options: &PortalOptions) -> Result<Self, OptionError> {
         Ok(Self {
-            accept_label: option(options, "accept_label")?,
+            accept_label: bounded_option(options, "accept_label", MAX_TEXT_BYTES)?,
             modal: option(options, "modal")?.unwrap_or(true),
             choices: parse_choices(options)?,
             current_folder: path_option(options, "current_folder")?,
@@ -304,6 +335,12 @@ fn parse_filters(
     key: &str,
 ) -> Result<Option<Vec<PortalFilter>>, OptionError> {
     let raw: Option<Vec<SerializedFilter>> = option(options, key)?;
+    if raw
+        .as_ref()
+        .is_some_and(|filters| filters.len() > MAX_FILTERS)
+    {
+        return Err(OptionError::new("too many portal filters"));
+    }
     raw.map(|filters| filters.into_iter().map(filter_from_serialized).collect())
         .transpose()
 }
@@ -314,6 +351,10 @@ fn filter_from_serialized(raw: SerializedFilter) -> Result<PortalFilter, OptionE
             "filters require a label and at least one rule",
         ));
     }
+    bounded("filter label", &raw.0, MAX_TEXT_BYTES)?;
+    if raw.1.len() > MAX_FILTER_RULES {
+        return Err(OptionError::new("too many rules in portal filter"));
+    }
     let rules = raw
         .1
         .into_iter()
@@ -321,6 +362,7 @@ fn filter_from_serialized(raw: SerializedFilter) -> Result<PortalFilter, OptionE
             if value.is_empty() {
                 return Err(OptionError::new("filter rule cannot be empty"));
             }
+            bounded("filter rule", &value, MAX_TEXT_BYTES)?;
             match kind {
                 0 => {
                     Glob::new(&value).map_err(|error| {
@@ -348,19 +390,30 @@ fn valid_mime_filter(value: &str) -> bool {
 
 fn parse_choices(options: &PortalOptions) -> Result<Vec<PortalChoice>, OptionError> {
     let choices: Vec<SerializedChoice> = option(options, "choices")?.unwrap_or_default();
+    if choices.len() > MAX_CHOICES {
+        return Err(OptionError::new("too many portal choices"));
+    }
     let mut ids = HashSet::new();
     choices
         .into_iter()
         .map(|(id, label, values, initial)| {
+            bounded("choice id", &id, MAX_TEXT_BYTES)?;
+            bounded("choice label", &label, MAX_TEXT_BYTES)?;
+            bounded("choice initial value", &initial, MAX_TEXT_BYTES)?;
+            if values.len() > MAX_CHOICE_OPTIONS {
+                return Err(OptionError::new("too many portal choice options"));
+            }
             if id.is_empty() || label.is_empty() || !ids.insert(id.clone()) {
                 return Err(OptionError::new(
                     "choice IDs and labels must be non-empty and unique",
                 ));
             }
-            if values
-                .iter()
-                .any(|(value_id, value_label)| value_id.is_empty() || value_label.is_empty())
-            {
+            if values.iter().any(|(value_id, value_label)| {
+                value_id.is_empty()
+                    || value_label.is_empty()
+                    || value_id.len() > MAX_TEXT_BYTES
+                    || value_label.len() > MAX_TEXT_BYTES
+            }) {
                 return Err(OptionError::new(
                     "choice option IDs and labels cannot be empty",
                 ));
@@ -395,6 +448,9 @@ fn path_option(options: &PortalOptions, key: &str) -> Result<Option<PathBuf>, Op
 }
 
 fn decode_nul_path(bytes: &[u8]) -> Result<PathBuf, OptionError> {
+    if bytes.len() > MAX_PATH_BYTES + 1 {
+        return Err(OptionError::new("path exceeds the portal size limit"));
+    }
     let raw = decode_nul_bytes(bytes, "path")?;
     if raw.is_empty() {
         return Err(OptionError::new("path cannot be empty"));
@@ -407,6 +463,9 @@ fn decode_nul_path(bytes: &[u8]) -> Result<PathBuf, OptionError> {
 }
 
 fn decode_nul_name(bytes: &[u8]) -> Result<OsString, OptionError> {
+    if bytes.len() > MAX_BASENAME_BYTES + 1 {
+        return Err(OptionError::new("file name exceeds the portal size limit"));
+    }
     let raw = decode_nul_bytes(bytes, "file name")?;
     let name = OsStr::from_bytes(raw);
     if raw.is_empty() || raw.contains(&b'/') || name == OsStr::new(".") || name == OsStr::new("..")
@@ -452,6 +511,46 @@ where
     option(options, key)?.ok_or_else(|| OptionError::new(format!("missing required option {key}")))
 }
 
+fn validate_option_map(options: &PortalOptions) -> Result<(), OptionError> {
+    if options.len() > MAX_PORTAL_OPTIONS {
+        return Err(OptionError::new("too many portal options"));
+    }
+    if options.keys().any(|key| key.len() > MAX_TEXT_BYTES) {
+        return Err(OptionError::new("portal option key is too long"));
+    }
+    Ok(())
+}
+
+fn bounded_option(
+    options: &PortalOptions,
+    key: &str,
+    max_bytes: usize,
+) -> Result<Option<String>, OptionError> {
+    let value: Option<String> = option(options, key)?;
+    if let Some(value) = &value {
+        bounded(key, value, max_bytes)?;
+    }
+    Ok(value)
+}
+
+fn bounded(label: &str, value: &str, max_bytes: usize) -> Result<(), OptionError> {
+    if value.len() > max_bytes {
+        Err(OptionError::new(format!(
+            "{label} exceeds {max_bytes} bytes"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn bounded_nonempty(label: &str, value: &str, max_bytes: usize) -> Result<(), OptionError> {
+    if value.is_empty() {
+        Err(OptionError::new(format!("{label} cannot be empty")))
+    } else {
+        bounded(label, value, max_bytes)
+    }
+}
+
 #[must_use]
 pub fn file_uri(path: &Path) -> Option<String> {
     Url::from_file_path(path).ok().map(|uri| uri.to_string())
@@ -466,7 +565,12 @@ pub fn parent_handle(parent_window: &str) -> Option<&str> {
 
 #[must_use]
 pub fn valid_save_name(name: &str) -> bool {
-    !name.is_empty() && !name.contains('/') && name != "." && name != ".." && !name.contains('\0')
+    !name.is_empty()
+        && name.len() <= MAX_BASENAME_BYTES
+        && !name.contains('/')
+        && name != "."
+        && name != ".."
+        && !name.contains('\0')
 }
 
 #[cfg(test)]
@@ -590,6 +694,20 @@ mod tests {
     fn response_never_returns_a_partial_uri_list() {
         let response = PortalResponse::from_outcome(PickerOutcome::Accepted {
             paths: vec![PathBuf::from("/tmp/valid"), PathBuf::from("relative")],
+            choices: Vec::new(),
+            current_filter: None,
+        });
+        assert_eq!(response.code, 2);
+        assert!(response.uris.is_empty());
+    }
+
+    #[test]
+    fn response_rejects_excessive_file_counts() {
+        let paths = (0..=MAX_PORTAL_FILES)
+            .map(|index| PathBuf::from(format!("/tmp/file-{index}")))
+            .collect();
+        let response = PortalResponse::from_outcome(PickerOutcome::Accepted {
+            paths,
             choices: Vec::new(),
             current_filter: None,
         });

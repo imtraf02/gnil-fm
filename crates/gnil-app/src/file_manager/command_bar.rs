@@ -130,7 +130,7 @@ fn command_bar_checked_item(
 impl FileManager {
     fn command_bar_menu_items(&self, kind: CommandBarMenuKind) -> Vec<CommandBarMenuItem> {
         let has_selection = self.selection.selected_count() > 0;
-        let writes_enabled = !self.operation_running;
+        let writes_enabled = true;
         match kind {
             CommandBarMenuKind::New => vec![
                 command_bar_item(
@@ -259,7 +259,7 @@ impl FileManager {
             &self.snapshot.entries,
             &self.settings.favorites,
             false,
-            self.operation_running,
+            false,
         );
         if context.selected_count == 1 {
             items.push(command_bar_item(

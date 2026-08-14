@@ -195,34 +195,63 @@ impl Picker {
             )
             .child(path_field)
             .child(div().w(px(220.0)).h_9().child(self.search_input.clone()))
+            .child(self.render_layout_selector(cx))
             .into_any_element()
     }
 
-    fn render_file_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_layout_selector(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("picker-layout-selector")
+            .h_9()
+            .flex_none()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(border()))
+            .overflow_hidden()
+            .flex()
+            .child(
+                picker_layout_button(
+                    "picker-layout-list",
+                    "icons/action-layout-list.svg",
+                    self.file_layout == FileLayout::Details,
+                )
+                .debug_selector(|| "picker-layout-list".into())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.set_file_layout(FileLayout::Details, cx);
+                })),
+            )
+            .child(
+                picker_layout_button(
+                    "picker-layout-grid",
+                    "icons/action-layout-grid.svg",
+                    self.file_layout == FileLayout::Grid,
+                )
+                .debug_selector(|| "picker-layout-grid".into())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.set_file_layout(FileLayout::Grid, cx);
+                })),
+            )
+            .into_any_element()
+    }
+
+    fn render_file_list(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let visible = self.visible_indices(cx);
         let snapshot = Arc::clone(&self.snapshot);
         let selected = self.selected.clone();
         let directory_only =
             matches!(&self.request.kind, PickerRequestKind::Open(options) if options.directory);
         if visible.is_empty() {
-            let title = if self.loading {
-                "Opening folder…"
-            } else if self.error.is_some() {
-                "This location is unavailable"
-            } else {
-                "Nothing matches here"
-            };
-            return div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .mt_6()
-                .gap_3()
-                .child(img("icons/empty-state.svg").size(px(220.0)))
-                .child(div().text_sm().text_color(rgb(text())).child(title))
-                .into_any_element();
+            return picker_empty_state(self.loading, self.error.is_some());
+        }
+        if self.file_layout == FileLayout::Grid {
+            return Self::render_file_grid(
+                visible,
+                snapshot,
+                selected,
+                directory_only,
+                window,
+                cx,
+            );
         }
         uniform_list(
             "picker-file-list",
@@ -284,6 +313,114 @@ impl Picker {
                                     .child(detail),
                             );
                         div().w_full().px_2().py(px(1.0)).child(row)
+                    })
+                    .collect()
+            }),
+        )
+        .flex_1()
+        .py_2()
+        .into_any_element()
+    }
+
+    fn render_file_grid(
+        visible: Arc<[usize]>,
+        snapshot: Arc<DirectorySnapshot>,
+        selected: HashSet<PathBuf>,
+        directory_only: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let width = window.viewport_size().width;
+        let columns = if width >= px(1040.0) {
+            5
+        } else if width >= px(840.0) {
+            4
+        } else {
+            3
+        };
+        let row_count = visible.len().div_ceil(columns);
+        uniform_list(
+            "picker-file-grid",
+            row_count,
+            cx.processor(move |_this, range: std::ops::Range<usize>, _, cx| {
+                range
+                    .map(|row_index| {
+                        let mut row = div().w_full().h(px(132.0)).flex().gap_2();
+                        for column in 0..columns {
+                            let visible_index = row_index * columns + column;
+                            let Some(entry_index) = visible.get(visible_index) else {
+                                row = row.child(div().h(px(128.0)).flex_1());
+                                continue;
+                            };
+                            let entry = snapshot.entries[*entry_index].clone();
+                            let highlighted = selected.contains(&entry.path);
+                            let disabled = directory_only && !entry_is_directory(&entry);
+                            let is_directory = entry_is_directory(&entry);
+                            let icon = file_icon_asset(&entry);
+                            let detail = picker_entry_detail(&entry, is_directory);
+                            let path_id = stable_picker_path_id(&entry.path);
+                            let name = entry.name.clone();
+                            let card = div()
+                                .id(("picker-grid-entry", path_id))
+                                .when(visible_index == 0, |card| {
+                                    card.debug_selector(|| "picker-grid-entry-0".into())
+                                })
+                                .when(!disabled, FocusableControl::with_focus_ring)
+                                .h(px(128.0))
+                                .flex_1()
+                                .min_w_0()
+                                .p_2()
+                                .rounded_md()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .justify_center()
+                                .gap_2()
+                                .cursor_pointer()
+                                .text_color(if disabled {
+                                    rgb(text_muted())
+                                } else {
+                                    rgb(text())
+                                })
+                                .when(highlighted, |card| card.bg(rgb(accent_background())))
+                                .when(!highlighted && !disabled, |card| {
+                                    card.hover(|style| style.bg(rgb(surface_elevated())))
+                                })
+                                .on_click(cx.listener(
+                                    move |this, event: &ClickEvent, window, cx| {
+                                        this.click_entry(visible_index, event, window, cx);
+                                    },
+                                ))
+                                .child(ui_icon(
+                                    icon,
+                                    IconSize::Detail,
+                                    if highlighted {
+                                        IconTone::Emphasized
+                                    } else {
+                                        IconTone::Default
+                                    },
+                                ))
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_center()
+                                        .text_sm()
+                                        .child(name),
+                                )
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .truncate()
+                                        .text_center()
+                                        .text_xs()
+                                        .text_color(rgb(text_muted()))
+                                        .child(detail),
+                                );
+                            row = row.child(card);
+                        }
+                        div().w_full().px_2().py_1().child(row)
                     })
                     .collect()
             }),
@@ -595,6 +732,27 @@ impl Picker {
             PickerRequestKind::Open(_) => None,
         }
     }
+}
+
+fn picker_empty_state(loading: bool, has_error: bool) -> AnyElement {
+    let title = if loading {
+        "Opening folder…"
+    } else if has_error {
+        "This location is unavailable"
+    } else {
+        "Nothing matches here"
+    };
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .mt_6()
+        .gap_3()
+        .child(img("icons/empty-state.svg").size(px(220.0)))
+        .child(div().text_sm().text_color(rgb(text())).child(title))
+        .into_any_element()
 }
 
 fn picker_entry_detail(entry: &FileEntry, is_directory: bool) -> String {

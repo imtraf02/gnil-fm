@@ -9,14 +9,16 @@ use anyhow::Result;
 
 use futures::Future;
 use image::{
-    AnimationDecoder, DynamicImage, Frame, ImageBuffer, ImageError, ImageFormat, Rgba,
+    AnimationDecoder, DynamicImage, Frame, ImageBuffer, ImageDecoder as ImageDecoderTrait,
+    ImageError, ImageFormat, ImageReader, Limits, Rgba,
     codecs::{gif::GifDecoder, webp::WebPDecoder},
 };
 use smallvec::SmallVec;
 use std::{
-    fs,
-    io::{self, Cursor},
+    fs::OpenOptions,
+    io::{self, Cursor, Read as _},
     ops::{Deref, DerefMut},
+    os::unix::fs::OpenOptionsExt as _,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -28,6 +30,11 @@ use super::{Stateful, StatefulInteractiveElement};
 
 /// The delay before showing the loading state.
 pub const LOADING_DELAY: Duration = Duration::from_millis(200);
+const MAX_ENCODED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DECODED_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION: u32 = 16_384;
+const MAX_IMAGE_PIXELS: u64 = 16_000_000;
+const MAX_ANIMATION_FRAMES: usize = 256;
 
 /// A type alias to the resource loader that the `img()` element uses.
 ///
@@ -572,12 +579,17 @@ impl Asset for ImageAssetLoader {
         let svg_renderer = cx.svg_renderer();
         let asset_source = cx.asset_source().clone();
         async move {
-            let bytes = match source.clone() {
-                Resource::Path(uri) => fs::read(uri.as_ref())?,
+            let (bytes, embedded) = match source.clone() {
+                Resource::Path(uri) => (read_bounded_image(uri.as_ref())?, false),
                 Resource::Embedded(path) => {
                     let data = asset_source.load(&path).ok().flatten();
                     if let Some(data) = data {
-                        data.to_vec()
+                        if data.len() > MAX_ENCODED_IMAGE_BYTES {
+                            return Err(ImageCacheError::Asset(
+                                "embedded image exceeds the encoded size limit".into(),
+                            ));
+                        }
+                        (data.to_vec(), true)
                     } else {
                         return Err(ImageCacheError::Asset(
                             format!("Embedded resource not found: {}", path).into(),
@@ -589,11 +601,15 @@ impl Asset for ImageAssetLoader {
             let data = if let Ok(format) = image::guess_format(&bytes) {
                 let data = match format {
                     ImageFormat::Gif => {
-                        let decoder = GifDecoder::new(Cursor::new(&bytes))?;
+                        let mut decoder = GifDecoder::new(Cursor::new(&bytes))?;
+                        decoder.set_limits(image_limits())?;
+                        validate_dimensions(decoder.dimensions())?;
                         let mut frames = SmallVec::new();
+                        let mut decoded_bytes = 0_u64;
 
                         for frame in decoder.into_frames() {
                             let mut frame = frame?;
+                            validate_animation_frame(&frame, frames.len(), &mut decoded_bytes)?;
                             // Convert from RGBA to BGRA.
                             for pixel in frame.buffer_mut().chunks_exact_mut(4) {
                                 pixel.swap(0, 2);
@@ -605,13 +621,17 @@ impl Asset for ImageAssetLoader {
                     }
                     ImageFormat::WebP => {
                         let mut decoder = WebPDecoder::new(Cursor::new(&bytes))?;
+                        decoder.set_limits(image_limits())?;
+                        validate_dimensions(decoder.dimensions())?;
 
                         if decoder.has_animation() {
                             let _ = decoder.set_background_color(Rgba([0, 0, 0, 0]));
                             let mut frames = SmallVec::new();
+                            let mut decoded_bytes = 0_u64;
 
                             for frame in decoder.into_frames() {
                                 let mut frame = frame?;
+                                validate_animation_frame(&frame, frames.len(), &mut decoded_bytes)?;
                                 // Convert from RGBA to BGRA.
                                 for pixel in frame.buffer_mut().chunks_exact_mut(4) {
                                     pixel.swap(0, 2);
@@ -622,6 +642,7 @@ impl Asset for ImageAssetLoader {
                             frames
                         } else {
                             let mut data = DynamicImage::from_decoder(decoder)?.into_rgba8();
+                            validate_dimensions(data.dimensions())?;
 
                             // Convert from RGBA to BGRA.
                             for pixel in data.chunks_exact_mut(4) {
@@ -632,8 +653,10 @@ impl Asset for ImageAssetLoader {
                         }
                     }
                     _ => {
-                        let mut data =
-                            image::load_from_memory_with_format(&bytes, format)?.into_rgba8();
+                        let mut reader = ImageReader::with_format(Cursor::new(&bytes), format);
+                        reader.limits(image_limits());
+                        let mut data = reader.decode()?.into_rgba8();
+                        validate_dimensions(data.dimensions())?;
 
                         // Convert from RGBA to BGRA.
                         for pixel in data.chunks_exact_mut(4) {
@@ -646,6 +669,12 @@ impl Asset for ImageAssetLoader {
 
                 RenderImage::new(data)
             } else {
+                if !embedded {
+                    return Err(ImageCacheError::Asset(
+                        "external SVG images are not decoded directly; use a bounded thumbnail"
+                            .into(),
+                    ));
+                }
                 let pixmap =
                     // TODO: Can we make svgs always rescale?
                     svg_renderer.render_pixmap(&bytes, SvgSize::ScaleFactor(SMOOTH_SVG_SCALE_FACTOR))?;
@@ -665,6 +694,84 @@ impl Asset for ImageAssetLoader {
             Ok(Arc::new(data))
         }
     }
+}
+
+fn image_limits() -> Limits {
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODED_IMAGE_BYTES);
+    limits
+}
+
+fn read_bounded_image(path: &Path) -> Result<Vec<u8>, ImageCacheError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(ImageCacheError::Asset(
+            "image input is not a regular file".into(),
+        ));
+    }
+    if metadata.len() > MAX_ENCODED_IMAGE_BYTES as u64 {
+        return Err(ImageCacheError::Asset(
+            "image exceeds the encoded size limit".into(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .unwrap_or(MAX_ENCODED_IMAGE_BYTES)
+            .min(MAX_ENCODED_IMAGE_BYTES),
+    );
+    file.take(MAX_ENCODED_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_ENCODED_IMAGE_BYTES {
+        return Err(ImageCacheError::Asset(
+            "image exceeds the encoded size limit".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn validate_dimensions((width, height): (u32, u32)) -> Result<(), ImageCacheError> {
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| ImageCacheError::Asset("image dimensions overflow".into()))?;
+    if width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION || pixels > MAX_IMAGE_PIXELS {
+        return Err(ImageCacheError::Asset(
+            "image exceeds the decoded pixel limit".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_animation_frame(
+    frame: &Frame,
+    frame_count: usize,
+    decoded_bytes: &mut u64,
+) -> Result<(), ImageCacheError> {
+    if frame_count >= MAX_ANIMATION_FRAMES {
+        return Err(ImageCacheError::Asset(
+            "animation exceeds the frame limit".into(),
+        ));
+    }
+    let dimensions = frame.buffer().dimensions();
+    validate_dimensions(dimensions)?;
+    let frame_bytes = u64::from(dimensions.0)
+        .checked_mul(u64::from(dimensions.1))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| ImageCacheError::Asset("animation size overflow".into()))?;
+    *decoded_bytes = decoded_bytes
+        .checked_add(frame_bytes)
+        .ok_or_else(|| ImageCacheError::Asset("animation size overflow".into()))?;
+    if *decoded_bytes > MAX_DECODED_IMAGE_BYTES {
+        return Err(ImageCacheError::Asset(
+            "animation exceeds the decoded memory limit".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// An error that can occur when interacting with the image cache.
@@ -708,5 +815,29 @@ impl From<usvg::Error> for ImageCacheError {
 impl From<image::ImageError> for ImageCacheError {
     fn from(value: image::ImageError) -> Self {
         Self::Image(Arc::new(value))
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_excessive_dimensions_and_pixel_counts() {
+        assert!(validate_dimensions((MAX_IMAGE_DIMENSION + 1, 1)).is_err());
+        assert!(validate_dimensions((4_001, 4_000)).is_err());
+        assert!(validate_dimensions((4_000, 4_000)).is_ok());
+    }
+
+    #[test]
+    fn animation_limits_include_all_decoded_frames() {
+        let frame = Frame::new(image::RgbaImage::new(1, 1));
+        let mut decoded_bytes = MAX_DECODED_IMAGE_BYTES - 3;
+        assert!(validate_animation_frame(&frame, 0, &mut decoded_bytes).is_err());
+
+        let mut decoded_bytes = 0;
+        assert!(
+            validate_animation_frame(&frame, MAX_ANIMATION_FRAMES, &mut decoded_bytes).is_err()
+        );
     }
 }

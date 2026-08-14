@@ -1,19 +1,25 @@
 use std::{
     collections::HashSet,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{self, BufReader, BufWriter, Read, Write},
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt as _, PermissionsExt},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    time::UNIX_EPOCH,
 };
 
 use gnil_core::{
-    ConflictDecision, FileFingerprint, FsOperation, JobProgress, OperationOutcome,
-    PermissionChange, PermissionUndo, RenamePair, TrashEntryRef, UndoKind, UndoRecord,
+    ConflictDecision, FsOperation, JobProgress, OperationOutcome, PermissionChange, PermissionUndo,
+    RenamePair, TrashEntryRef, TreeFingerprint, UndoKind, UndoRecord,
 };
 use thiserror::Error;
 use uuid::Uuid;
+
+use crate::{
+    fingerprint::{self, FingerprintError, MAX_UNDO_ENTRIES},
+    secure_fs,
+};
+
+mod job_execution;
 
 #[derive(Debug, Error)]
 pub enum OperationError {
@@ -35,6 +41,11 @@ pub enum OperationError {
     InvalidRename(String),
     #[error("operation failed and rollback was incomplete: {0}")]
     RollbackFailed(String),
+    #[error("undo conflict at {path}; recover quarantined data from {recovery_paths:?}")]
+    UndoConflict {
+        path: PathBuf,
+        recovery_paths: Vec<PathBuf>,
+    },
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error("trash operation failed: {0}")]
@@ -123,24 +134,36 @@ impl OperationExecutor {
         }
     }
 
+    #[must_use]
+    pub fn execute_job(
+        &self,
+        operation: &FsOperation,
+        job: &crate::JobContext,
+    ) -> crate::JobResult<OperationOutcome> {
+        job_execution::execute(self, operation, job)
+    }
+
     fn create_file(&self, path: &Path) -> Result<OperationOutcome, OperationError> {
-        OpenOptions::new().write(true).create_new(true).open(path)?;
+        let parent = secure_fs::open_parent(path)?;
+        secure_fs::create_file(&parent, 0o666)?;
         Ok(created_outcome("Create file", vec![path.to_path_buf()]))
     }
 
     fn create_directory(&self, path: &Path) -> Result<OperationOutcome, OperationError> {
-        fs::create_dir(path)?;
+        let parent = secure_fs::open_parent(path)?;
+        secure_fs::create_dir(&parent, 0o777)?;
         Ok(created_outcome("Create folder", vec![path.to_path_buf()]))
     }
 
     fn rename(&self, from: &Path, to: &Path) -> Result<OperationOutcome, OperationError> {
-        if path_lexists(to) {
-            return Err(OperationError::Conflict(to.to_path_buf()));
-        }
-        fs::rename(from, to)?;
+        let from_parent = secure_fs::open_parent(from)?;
+        let to_parent = secure_fs::open_parent(to)?;
+        secure_fs::rename_noreplace(&from_parent, &to_parent)
+            .map_err(|error| map_conflict(error, to))?;
         Ok(OperationOutcome {
             affected_paths: vec![to.to_path_buf()],
             skipped_paths: Vec::new(),
+            issues: Vec::new(),
             undo: Some(UndoRecord {
                 label: "Rename".into(),
                 kind: UndoKind::RenameBack {
@@ -156,13 +179,13 @@ impl OperationExecutor {
         link_path: &Path,
         target: &Path,
     ) -> Result<OperationOutcome, OperationError> {
-        if path_lexists(link_path) {
-            return Err(OperationError::Conflict(link_path.to_path_buf()));
-        }
-        std::os::unix::fs::symlink(target, link_path)?;
+        let parent = secure_fs::open_parent(link_path)?;
+        secure_fs::create_symlink(target.as_os_str(), &parent)
+            .map_err(|error| map_conflict(error, link_path))?;
         Ok(OperationOutcome {
             affected_paths: vec![link_path.to_path_buf()],
             skipped_paths: Vec::new(),
+            issues: Vec::new(),
             undo: Some(UndoRecord {
                 label: "Create symlink".into(),
                 kind: UndoKind::RemoveSymlink {
@@ -204,34 +227,41 @@ impl OperationExecutor {
                 (before | bits_to_set) & !bits_to_clear & MODE_MASK
             });
             if before != after {
-                entries.push(PermissionUndo {
-                    path: path.clone(),
-                    before,
-                    after,
-                });
+                entries.push((
+                    PermissionUndo {
+                        path: path.clone(),
+                        before,
+                        after,
+                    },
+                    (metadata.dev(), metadata.ino()),
+                ));
             }
         }
 
         let mut changed = Vec::new();
-        for entry in &entries {
-            if let Err(error) =
-                fs::set_permissions(&entry.path, fs::Permissions::from_mode(entry.after))
-            {
+        for (entry, identity) in &entries {
+            if let Err(error) = secure_fs::chmod_nofollow(&entry.path, entry.after, *identity) {
                 let rollback_errors = rollback_permissions(&changed);
                 if rollback_errors.is_empty() {
                     return Err(error.into());
                 }
                 return Err(OperationError::RollbackFailed(rollback_errors.join("; ")));
             }
-            changed.push(entry.clone());
+            changed.push((entry.clone(), *identity));
         }
 
         Ok(OperationOutcome {
-            affected_paths: entries.iter().map(|entry| entry.path.clone()).collect(),
+            affected_paths: entries
+                .iter()
+                .map(|(entry, _)| entry.path.clone())
+                .collect(),
             skipped_paths: Vec::new(),
+            issues: Vec::new(),
             undo: (!entries.is_empty()).then(|| UndoRecord {
                 label: "Change permissions".into(),
-                kind: UndoKind::RestorePermissions { entries },
+                kind: UndoKind::RestorePermissions {
+                    entries: entries.into_iter().map(|(entry, _)| entry).collect(),
+                },
             }),
         })
     }
@@ -259,14 +289,20 @@ impl OperationExecutor {
                 .from
                 .parent()
                 .ok_or_else(|| OperationError::MissingFileName(pair.from.clone()))?;
-            let temporary = unique_temporary_path(parent);
-            if let Err(error) = fs::rename(&pair.from, &temporary) {
-                let rollback_errors = rollback_staged(&staged);
-                if rollback_errors.is_empty() {
-                    return Err(error.into());
+            let temporary = loop {
+                let candidate = unique_temporary_path(parent);
+                match rename_path_noreplace(&pair.from, &candidate) {
+                    Ok(()) => break candidate,
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        let rollback_errors = rollback_staged(&staged);
+                        if rollback_errors.is_empty() {
+                            return Err(error.into());
+                        }
+                        return Err(OperationError::RollbackFailed(rollback_errors.join("; ")));
+                    }
                 }
-                return Err(OperationError::RollbackFailed(rollback_errors.join("; ")));
-            }
+            };
             staged.push((pair.clone(), temporary));
         }
 
@@ -278,10 +314,10 @@ impl OperationExecutor {
                 }
                 return Err(OperationError::RollbackFailed(rollback_errors.join("; ")));
             }
-            if let Err(error) = fs::rename(temporary, &pair.to) {
+            if let Err(error) = rename_path_noreplace(temporary, &pair.to) {
                 let rollback_errors = rollback_bulk_rename(&staged, completed);
                 if rollback_errors.is_empty() {
-                    return Err(error.into());
+                    return Err(map_conflict(error, &pair.to));
                 }
                 return Err(OperationError::RollbackFailed(rollback_errors.join("; ")));
             }
@@ -297,6 +333,7 @@ impl OperationExecutor {
         Ok(OperationOutcome {
             affected_paths: pairs.iter().map(|pair| pair.to.clone()).collect(),
             skipped_paths: Vec::new(),
+            issues: Vec::new(),
             undo: Some(UndoRecord {
                 label: "Bulk rename".into(),
                 kind: UndoKind::BulkRenameBack { pairs: undo_pairs },
@@ -320,26 +357,50 @@ impl OperationExecutor {
                 .file_name()
                 .ok_or_else(|| OperationError::MissingFileName(source.clone()))?;
             let requested = destination.join(name);
-            let Some(target) = resolve_conflict(&requested, conflict)? else {
+            let Some(mut target) = resolve_conflict(&requested, conflict)? else {
                 skipped.push(source.clone());
                 continue;
             };
-            guard_recursive_destination(source, &target)?;
-            copy_path(source, &target, cancelled)?;
+            loop {
+                guard_recursive_destination(source, &target)?;
+                let result = if conflict == ConflictDecision::MergeDirectory {
+                    copy_path(source, &target, cancelled)
+                } else {
+                    copy_path_transactional(
+                        source,
+                        &target,
+                        conflict == ConflictDecision::Replace,
+                        cancelled,
+                    )
+                };
+                match result {
+                    Ok(()) => break,
+                    Err(OperationError::Io(error))
+                        if error.kind() == io::ErrorKind::AlreadyExists
+                            && conflict == ConflictDecision::KeepBoth =>
+                    {
+                        target = unique_copy_path(&requested);
+                    }
+                    Err(OperationError::Io(error))
+                        if error.kind() == io::ErrorKind::AlreadyExists =>
+                    {
+                        return Err(OperationError::Conflict(target));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             affected.push(target);
         }
-        let fingerprints = affected
-            .iter()
-            .filter_map(|path| fingerprint(path).map(|value| (path.clone(), value)))
-            .collect();
+        let trees = fingerprint::fingerprint_trees(&affected, MAX_UNDO_ENTRIES)
+            .ok()
+            .flatten();
         Ok(OperationOutcome {
             affected_paths: affected,
             skipped_paths: skipped,
-            undo: Some(UndoRecord {
+            issues: Vec::new(),
+            undo: trees.map(|trees| UndoRecord {
                 label: "Copy".into(),
-                kind: UndoKind::RemoveCreated {
-                    paths: fingerprints,
-                },
+                kind: UndoKind::RemoveCreated { trees },
             }),
         })
     }
@@ -361,18 +422,47 @@ impl OperationExecutor {
                 .file_name()
                 .ok_or_else(|| OperationError::MissingFileName(source.clone()))?;
             let requested = destination.join(name);
-            let Some(target) = resolve_conflict(&requested, conflict)? else {
+            let Some(mut target) = resolve_conflict(&requested, conflict)? else {
                 skipped.push(source.clone());
                 continue;
             };
-            guard_recursive_destination(source, &target)?;
-            match fs::rename(source, &target) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
-                    copy_path(source, &target, cancelled)?;
-                    remove_path(source)?;
+            loop {
+                guard_recursive_destination(source, &target)?;
+                let result = if matches!(
+                    conflict,
+                    ConflictDecision::Replace | ConflictDecision::MergeDirectory
+                ) {
+                    let result = if conflict == ConflictDecision::Replace {
+                        copy_path_transactional(source, &target, true, cancelled)
+                    } else {
+                        copy_path(source, &target, cancelled)
+                    };
+                    result.and_then(|()| remove_path(source).map_err(OperationError::from))
+                } else {
+                    match rename_path_noreplace(source, &target) {
+                        Ok(()) => Ok(()),
+                        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+                            copy_path_transactional(source, &target, false, cancelled)
+                                .and_then(|()| remove_path(source).map_err(OperationError::from))
+                        }
+                        Err(error) => Err(OperationError::Io(error)),
+                    }
+                };
+                match result {
+                    Ok(()) => break,
+                    Err(OperationError::Io(error))
+                        if error.kind() == io::ErrorKind::AlreadyExists
+                            && conflict == ConflictDecision::KeepBoth =>
+                    {
+                        target = unique_copy_path(&requested);
+                    }
+                    Err(OperationError::Io(error))
+                        if error.kind() == io::ErrorKind::AlreadyExists =>
+                    {
+                        return Err(OperationError::Conflict(target));
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) => return Err(error.into()),
             }
             affected.push(target.clone());
             undo_pairs.push((target, source.clone()));
@@ -380,6 +470,7 @@ impl OperationExecutor {
         Ok(OperationOutcome {
             affected_paths: affected,
             skipped_paths: skipped,
+            issues: Vec::new(),
             undo: Some(UndoRecord {
                 label: "Move".into(),
                 kind: UndoKind::MoveBack { pairs: undo_pairs },
@@ -392,6 +483,7 @@ impl OperationExecutor {
         Ok(OperationOutcome {
             affected_paths: paths.to_vec(),
             skipped_paths: Vec::new(),
+            issues: Vec::new(),
             undo: Some(UndoRecord {
                 label: "Move to trash".into(),
                 kind: UndoKind::RestoreTrash {
@@ -413,6 +505,7 @@ impl OperationExecutor {
         Ok(OperationOutcome {
             affected_paths: paths.to_vec(),
             skipped_paths: Vec::new(),
+            issues: Vec::new(),
             undo: None,
         })
     }
@@ -436,19 +529,33 @@ impl OperationExecutor {
         let mut affected = Vec::with_capacity(entries.len());
         for entry in entries {
             ensure_not_cancelled(cancelled)?;
-            if replace_existing && path_lexists(&entry.original_path) {
-                remove_path(&entry.original_path)?;
-            }
             if let Some(parent) = entry.original_path.parent() {
-                fs::create_dir_all(parent)?;
+                secure_fs::ensure_dir(parent, 0o777)?;
             }
-            match fs::rename(&entry.trashed_path, &entry.original_path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
-                    copy_path(&entry.trashed_path, &entry.original_path, cancelled)?;
-                    remove_path(&entry.trashed_path)?;
+            if replace_existing {
+                copy_path_transactional(
+                    &entry.trashed_path,
+                    &entry.original_path,
+                    true,
+                    cancelled,
+                )?;
+                remove_path(&entry.trashed_path)?;
+            } else {
+                match rename_path_noreplace(&entry.trashed_path, &entry.original_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+                        copy_path_transactional(
+                            &entry.trashed_path,
+                            &entry.original_path,
+                            false,
+                            cancelled,
+                        )?;
+                        remove_path(&entry.trashed_path)?;
+                    }
+                    Err(error) => {
+                        return Err(map_conflict(error, &entry.original_path));
+                    }
                 }
-                Err(error) => return Err(error.into()),
             }
             if entry.info_path.exists() {
                 fs::remove_file(&entry.info_path)?;
@@ -458,6 +565,7 @@ impl OperationExecutor {
         Ok(OperationOutcome {
             affected_paths: affected,
             skipped_paths: Vec::new(),
+            issues: Vec::new(),
             undo: None,
         })
     }
@@ -481,38 +589,33 @@ impl OperationExecutor {
         Ok(OperationOutcome {
             affected_paths: affected,
             skipped_paths: Vec::new(),
+            issues: Vec::new(),
             undo: None,
         })
     }
 
     pub fn undo(&self, record: &UndoRecord) -> Result<(), OperationError> {
         match &record.kind {
-            UndoKind::RemoveCreated { paths } => {
-                for (path, expected) in paths.iter().rev() {
-                    if fingerprint(path).as_ref() != Some(expected) {
-                        return Err(OperationError::Conflict(path.clone()));
-                    }
-                    remove_path(path)?;
-                }
+            UndoKind::RemoveCreated { trees } => {
+                fingerprint::quarantine_and_remove(trees)
+                    .map_err(|error| map_fingerprint_error(error, trees))?;
             }
             UndoKind::RenameBack { from, to } => {
-                if path_lexists(to) {
-                    return Err(OperationError::Conflict(to.clone()));
-                }
-                fs::rename(from, to)?;
+                rename_path_noreplace(from, to).map_err(|error| map_conflict(error, to))?;
             }
             UndoKind::BulkRenameBack { pairs } => {
                 self.bulk_rename(pairs, &AtomicBool::new(false))?;
             }
             UndoKind::RemoveSymlink { link_path, target } => {
-                let metadata = fs::symlink_metadata(link_path)
+                let parent = secure_fs::open_parent(link_path)
                     .map_err(|_| OperationError::Conflict(link_path.clone()))?;
-                if !metadata.file_type().is_symlink() || fs::read_link(link_path)? != *target {
+                if secure_fs::read_link(&parent).ok().as_deref() != Some(target.as_os_str()) {
                     return Err(OperationError::Conflict(link_path.clone()));
                 }
-                fs::remove_file(link_path)?;
+                secure_fs::remove_tree(&parent)?;
             }
             UndoKind::RestorePermissions { entries } => {
+                let mut identities = Vec::with_capacity(entries.len());
                 for entry in entries {
                     let metadata = fs::symlink_metadata(&entry.path)?;
                     if metadata.file_type().is_symlink()
@@ -520,22 +623,21 @@ impl OperationExecutor {
                     {
                         return Err(OperationError::Conflict(entry.path.clone()));
                     }
+                    identities.push((metadata.dev(), metadata.ino()));
                 }
-                for entry in entries {
-                    fs::set_permissions(&entry.path, fs::Permissions::from_mode(entry.before))?;
+                for (entry, identity) in entries.iter().zip(identities) {
+                    secure_fs::chmod_nofollow(&entry.path, entry.before, identity)?;
                 }
             }
             UndoKind::MoveBack { pairs } => {
                 for (from, to) in pairs.iter().rev() {
-                    if path_lexists(to) {
-                        return Err(OperationError::Conflict(to.clone()));
-                    }
-                    fs::rename(from, to)?;
+                    rename_path_noreplace(from, to).map_err(|error| map_conflict(error, to))?;
                 }
             }
             UndoKind::RestoreTrash { original_paths } => restore_from_trash(original_paths)?,
             UndoKind::RemoveExtracted { trees } => {
-                crate::archive::remove_extracted_trees(trees)?;
+                fingerprint::quarantine_and_remove(trees)
+                    .map_err(|error| map_fingerprint_error(error, trees))?;
             }
         }
         Ok(())
@@ -543,18 +645,16 @@ impl OperationExecutor {
 }
 
 fn created_outcome(label: &str, paths: Vec<PathBuf>) -> OperationOutcome {
-    let fingerprints = paths
-        .iter()
-        .filter_map(|path| fingerprint(path).map(|value| (path.clone(), value)))
-        .collect();
+    let trees = fingerprint::fingerprint_trees(&paths, MAX_UNDO_ENTRIES)
+        .ok()
+        .flatten();
     OperationOutcome {
         affected_paths: paths,
         skipped_paths: Vec::new(),
-        undo: Some(UndoRecord {
+        issues: Vec::new(),
+        undo: trees.map(|trees| UndoRecord {
             label: label.into(),
-            kind: UndoKind::RemoveCreated {
-                paths: fingerprints,
-            },
+            kind: UndoKind::RemoveCreated { trees },
         }),
     }
 }
@@ -634,7 +734,7 @@ fn rollback_staged(staged: &[(RenamePair, PathBuf)]) -> Vec<String> {
     let mut errors = Vec::new();
     for (pair, temporary) in staged.iter().rev() {
         if path_lexists(temporary) {
-            if let Err(error) = fs::rename(temporary, &pair.from) {
+            if let Err(error) = rename_path_noreplace(temporary, &pair.from) {
                 errors.push(format!("{}: {error}", pair.from.display()));
             }
         }
@@ -645,7 +745,7 @@ fn rollback_staged(staged: &[(RenamePair, PathBuf)]) -> Vec<String> {
 fn rollback_bulk_rename(staged: &[(RenamePair, PathBuf)], completed: usize) -> Vec<String> {
     let mut errors = Vec::new();
     for (pair, temporary) in staged[..completed].iter().rev() {
-        if let Err(error) = fs::rename(&pair.to, temporary) {
+        if let Err(error) = rename_path_noreplace(&pair.to, temporary) {
             errors.push(format!("{}: {error}", pair.to.display()));
         }
     }
@@ -653,12 +753,37 @@ fn rollback_bulk_rename(staged: &[(RenamePair, PathBuf)], completed: usize) -> V
     errors
 }
 
-fn rollback_permissions(entries: &[PermissionUndo]) -> Vec<String> {
+fn rename_path_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    let from_parent = secure_fs::open_parent(from)?;
+    let to_parent = secure_fs::open_parent(to)?;
+    secure_fs::rename_noreplace(&from_parent, &to_parent)
+}
+
+fn map_conflict(error: io::Error, path: &Path) -> OperationError {
+    if error.kind() == io::ErrorKind::AlreadyExists {
+        OperationError::Conflict(path.to_path_buf())
+    } else {
+        OperationError::Io(error)
+    }
+}
+
+fn map_fingerprint_error(error: FingerprintError, trees: &[TreeFingerprint]) -> OperationError {
+    match error {
+        FingerprintError::Io(error) => OperationError::Io(error),
+        FingerprintError::Conflict(path) => OperationError::Conflict(path),
+        FingerprintError::Recovery(recovery_paths) => OperationError::UndoConflict {
+            path: trees
+                .first()
+                .map_or_else(PathBuf::new, |tree| tree.root.clone()),
+            recovery_paths,
+        },
+    }
+}
+
+fn rollback_permissions(entries: &[(PermissionUndo, (u64, u64))]) -> Vec<String> {
     let mut errors = Vec::new();
-    for entry in entries.iter().rev() {
-        if let Err(error) =
-            fs::set_permissions(&entry.path, fs::Permissions::from_mode(entry.before))
-        {
+    for (entry, identity) in entries.iter().rev() {
+        if let Err(error) = secure_fs::chmod_nofollow(&entry.path, entry.before, *identity) {
             errors.push(format!("{}: {error}", entry.path.display()));
         }
     }
@@ -676,11 +801,9 @@ fn resolve_conflict(
         ConflictDecision::Ask => Err(OperationError::Conflict(requested.to_path_buf())),
         ConflictDecision::Skip => Ok(None),
         ConflictDecision::KeepBoth => Ok(Some(unique_copy_path(requested))),
-        ConflictDecision::Replace => {
-            remove_path(requested)?;
+        ConflictDecision::Replace | ConflictDecision::MergeDirectory => {
             Ok(Some(requested.to_path_buf()))
         }
-        ConflictDecision::MergeDirectory => Ok(Some(requested.to_path_buf())),
     }
 }
 
@@ -724,16 +847,80 @@ fn copy_path(source: &Path, target: &Path, cancelled: &AtomicBool) -> Result<(),
     if metadata.file_type().is_symlink() {
         copy_symlink(source, target)?;
     } else if metadata.is_dir() {
-        fs::create_dir_all(target)?;
-        for item in fs::read_dir(source)? {
-            let item = item?;
-            copy_path(&item.path(), &target.join(item.file_name()), cancelled)?;
+        let target_parent = secure_fs::open_parent(target)?;
+        let target_directory =
+            match secure_fs::create_dir(&target_parent, metadata.permissions().mode() & 0o7777) {
+                Ok(directory) => directory,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    secure_fs::open_dir(target)?
+                }
+                Err(error) => return Err(error.into()),
+            };
+        drop(target_directory);
+        for name in secure_fs::list_dir(source)? {
+            copy_path(&source.join(&name), &target.join(name), cancelled)?;
         }
-        fs::set_permissions(target, metadata.permissions())?;
+        let target_metadata = fs::symlink_metadata(target)?;
+        secure_fs::chmod_nofollow(
+            target,
+            metadata.permissions().mode() & 0o7777,
+            (target_metadata.dev(), target_metadata.ino()),
+        )?;
     } else if metadata.is_file() {
         copy_file_atomic(source, target, cancelled)?;
     }
     Ok(())
+}
+
+fn copy_path_transactional(
+    source: &Path,
+    target: &Path,
+    replace: bool,
+    cancelled: &AtomicBool,
+) -> Result<(), OperationError> {
+    if !replace {
+        return copy_path(source, target, cancelled);
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| OperationError::MissingFileName(target.to_path_buf()))?;
+    let staging = parent.join(format!(".gnil-replace-{}", Uuid::new_v4()));
+    let result = (|| {
+        copy_path(source, &staging, cancelled)?;
+        commit_staged_replacement(&staging, target)?;
+        Ok(())
+    })();
+    if result.is_err() && path_lexists(&staging) {
+        let _ = remove_path(&staging);
+    }
+    result
+}
+
+fn commit_staged_replacement(staging: &Path, target: &Path) -> Result<(), OperationError> {
+    let staging_parent = secure_fs::open_parent(staging)?;
+    let target_parent = secure_fs::open_parent(target)?;
+    loop {
+        if secure_fs::exists(&target_parent)? {
+            match secure_fs::rename_exchange(&staging_parent, &target_parent) {
+                Ok(()) => {
+                    if let Err(error) = secure_fs::remove_tree(&staging_parent) {
+                        return Err(OperationError::RollbackFailed(format!(
+                            "replacement committed; old destination retained at {}: {error}",
+                            staging.display()
+                        )));
+                    }
+                    return Ok(());
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        match secure_fs::rename_noreplace(&staging_parent, &target_parent) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 fn copy_file_atomic(
@@ -741,23 +928,21 @@ fn copy_file_atomic(
     target: &Path,
     cancelled: &AtomicBool,
 ) -> Result<(), OperationError> {
-    if path_lexists(target) {
-        return Err(OperationError::Conflict(target.to_path_buf()));
-    }
     let parent = target
         .parent()
         .ok_or_else(|| OperationError::MissingFileName(target.to_path_buf()))?;
-    fs::create_dir_all(parent)?;
     let temporary = parent.join(format!(".gnil-part-{}", Uuid::new_v4()));
     let result = (|| {
-        let metadata = fs::metadata(source)?;
-        let mut reader = BufReader::new(File::open(source)?);
-        let mut writer = BufWriter::new(
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?,
-        );
+        let source_parent = secure_fs::open_parent(source)?;
+        let source_file = File::from(secure_fs::open_file_readonly(&source_parent)?);
+        let metadata = source_file.metadata()?;
+        let temporary_parent = secure_fs::open_parent(&temporary)?;
+        let temporary_file = File::from(secure_fs::create_file(
+            &temporary_parent,
+            metadata.permissions().mode() & 0o7777,
+        )?);
+        let mut reader = BufReader::new(source_file);
+        let mut writer = BufWriter::new(temporary_file);
         let mut buffer = vec![0_u8; 1024 * 1024];
         loop {
             ensure_not_cancelled(cancelled)?;
@@ -769,19 +954,30 @@ fn copy_file_atomic(
         }
         writer.flush()?;
         writer.get_ref().sync_all()?;
-        fs::set_permissions(&temporary, metadata.permissions())?;
-        fs::rename(&temporary, target)?;
+        writer
+            .get_ref()
+            .set_permissions(fs::Permissions::from_mode(
+                metadata.permissions().mode() & 0o7777,
+            ))?;
+        let target_parent = secure_fs::open_parent(target)?;
+        secure_fs::rename_noreplace(&temporary_parent, &target_parent)?;
         Ok(())
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+    if result.is_err()
+        && let Ok(parent) = secure_fs::open_parent(&temporary)
+        && secure_fs::exists(&parent).unwrap_or(false)
+    {
+        let _ = secure_fs::remove_tree(&parent);
     }
     result
 }
 
 #[cfg(unix)]
 fn copy_symlink(source: &Path, target: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(fs::read_link(source)?, target)
+    let source_parent = secure_fs::open_parent(source)?;
+    let target_parent = secure_fs::open_parent(target)?;
+    let link_target = secure_fs::read_link(&source_parent)?;
+    secure_fs::create_symlink(link_target.as_os_str(), &target_parent)
 }
 
 #[cfg(not(unix))]
@@ -793,25 +989,8 @@ fn copy_symlink(_source: &Path, _target: &Path) -> io::Result<()> {
 }
 
 fn remove_path(path: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    }
-}
-
-fn fingerprint(path: &Path) -> Option<FileFingerprint> {
-    let metadata = fs::symlink_metadata(path).ok()?;
-    let modified_unix_ms = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok());
-    Some(FileFingerprint {
-        len: metadata.len(),
-        modified_unix_ms,
-    })
+    let parent = secure_fs::open_parent(path)?;
+    secure_fs::remove_tree(&parent)
 }
 
 fn restore_from_trash(original_paths: &[PathBuf]) -> Result<(), OperationError> {
@@ -1026,11 +1205,41 @@ mod tests {
                 &AtomicBool::new(false),
             )
             .unwrap();
-        fs::write(destination.join("notes.txt"), b"changed after copy").unwrap();
+        // Keep the byte length identical so metadata-only fingerprints cannot catch this.
+        fs::write(destination.join("notes.txt"), b"world").unwrap();
         assert!(matches!(
             executor.undo(outcome.undo.as_ref().unwrap()),
             Err(OperationError::Conflict(_))
         ));
+    }
+
+    #[test]
+    fn undo_refuses_to_remove_copy_with_an_added_descendant() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("nested/original.txt"), b"original").unwrap();
+        let executor = OperationExecutor;
+        let outcome = executor
+            .execute(
+                &FsOperation::Copy {
+                    sources: vec![source],
+                    destination: destination.clone(),
+                    conflict: ConflictDecision::Ask,
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let copied = destination.join("source");
+        fs::write(copied.join("nested/added.txt"), b"user data").unwrap();
+
+        assert!(matches!(
+            executor.undo(outcome.undo.as_ref().unwrap()),
+            Err(OperationError::Conflict(_))
+        ));
+        assert!(copied.join("nested/added.txt").exists());
     }
 
     #[test]

@@ -1,3 +1,11 @@
+struct OpenWithPresentation {
+    path: PathBuf,
+    mime_type: String,
+    catalog: Option<OpenWithCatalog>,
+    loading: bool,
+    error: Option<String>,
+}
+
 impl OpenWithChooserState {
     fn application_ids(&self, cx: &App) -> Vec<String> {
         let Some(catalog) = &self.catalog else {
@@ -26,9 +34,108 @@ impl OpenWithChooserState {
             .chain(&catalog.all)
             .find(|application| application.desktop_id == desktop_id)
     }
+
+    pub(super) fn can_set_default(&self) -> bool {
+        self.mime_type != "application/octet-stream"
+            && self
+                .selected_desktop_id
+                .as_deref()
+                .and_then(|selected| self.application(selected))
+                .is_some_and(|application| application.declared_compatible)
+    }
 }
 
 impl FileManager {
+    fn quick_open_file(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.quick_open_serial = self.quick_open_serial.wrapping_add(1);
+        let serial = self.quick_open_serial;
+        self.open_with_chooser = None;
+
+        let path_for_discovery = path.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { discover_applications(&path_for_discovery, None) });
+        cx.spawn_in(window, async move |this, cx| {
+            let catalog = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.quick_open_serial != serial {
+                    return;
+                }
+                this.finish_quick_open_resolution(serial, path, catalog, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_quick_open_resolution(
+        &mut self,
+        serial: u64,
+        path: PathBuf,
+        catalog: OpenWithCatalog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(application) = catalog.safe_default.clone() else {
+            self.present_open_with_chooser(
+                OpenWithPresentation {
+                    path,
+                    mime_type: catalog.mime_type.clone(),
+                    catalog: Some(catalog),
+                    loading: false,
+                    error: None,
+                },
+                window,
+                cx,
+            );
+            return;
+        };
+
+        let path_for_launch = path.clone();
+        let mime_type = catalog.mime_type.clone();
+        let application_for_launch = application.clone();
+        let task = cx.background_executor().spawn(async move {
+            launch_safe_default(
+                &application_for_launch,
+                &path_for_launch,
+                &mime_type,
+            )
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.quick_open_serial != serial {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        this.status_message =
+                            Some(format!("Opened with {}", application.name));
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        this.present_open_with_chooser(
+                            OpenWithPresentation {
+                                path,
+                                mime_type: catalog.mime_type.clone(),
+                                catalog: Some(catalog),
+                                loading: false,
+                                error: Some(error),
+                            },
+                            window,
+                            cx,
+                        );
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     fn selected_open_with_target(&self) -> Option<(PathBuf, String)> {
         let paths = self.selection.effective_paths(&self.snapshot.entries);
         let [path] = paths.as_slice() else {
@@ -71,17 +178,11 @@ impl FileManager {
             return;
         };
         menu.open_open_with_submenu(path.clone(), mime_type.clone());
-        if let Some(catalog) = self.open_with_catalogs.get(&mime_type).cloned() {
-            Self::finish_open_with_submenu(menu, &catalog);
-            cx.notify();
-            return;
-        }
 
         let menu_serial = menu.serial;
-        let metadata_mime = mime_type.clone();
         let task = cx
             .background_executor()
-            .spawn(async move { discover_applications(&path, Some(&metadata_mime)) });
+            .spawn(async move { discover_applications(&path, None) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -97,8 +198,6 @@ impl FileManager {
                 };
                 submenu.loading = false;
                 Self::finish_open_with_submenu(menu, &result);
-                this.open_with_catalogs
-                    .insert(result.mime_type.clone(), result);
                 cx.notify();
             });
         })
@@ -135,6 +234,59 @@ impl FileManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.quick_open_serial = self.quick_open_serial.wrapping_add(1);
+        let serial = self.present_open_with_chooser(
+            OpenWithPresentation {
+                path: path.clone(),
+                mime_type,
+                catalog: None,
+                loading: true,
+                error: None,
+            },
+            window,
+            cx,
+        );
+
+        let task = cx
+            .background_executor()
+            .spawn(async move { discover_applications(&path, None) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(chooser) = this
+                    .open_with_chooser
+                    .as_mut()
+                    .filter(|chooser| chooser.serial == serial)
+                else {
+                    return;
+                };
+                chooser.loading = false;
+                chooser.mime_type.clone_from(&result.mime_type);
+                chooser.selected_desktop_id = result
+                    .suggested
+                    .first()
+                    .or_else(|| result.all.first())
+                    .map(|application| application.desktop_id.clone());
+                chooser.catalog = Some(result.clone());
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn present_open_with_chooser(
+        &mut self,
+        presentation: OpenWithPresentation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let OpenWithPresentation {
+            path,
+            mime_type,
+            catalog,
+            loading,
+            error,
+        } = presentation;
         self.action_menu = None;
         self.empty_space_menu = None;
         self.open_with_serial = self.open_with_serial.wrapping_add(1);
@@ -162,7 +314,6 @@ impl FileManager {
                     cx.notify();
                 }
             });
-        let catalog = self.open_with_catalogs.get(&mime_type).cloned();
         let selected_desktop_id = catalog.as_ref().and_then(|catalog| {
             catalog
                 .suggested
@@ -179,48 +330,16 @@ impl FileManager {
             _search_subscription: search_subscription,
             selected_desktop_id,
             always_use: false,
-            loading: !self.open_with_catalogs.contains_key(&mime_type),
-            error: None,
+            loading,
+            error,
             motion: OverlayMotionState::Opening,
             serial,
         });
         search.update(cx, |search, cx| {
             window.focus(&search.focus_handle(cx));
         });
-
-        if self.open_with_catalogs.contains_key(&mime_type) {
-            cx.notify();
-            return;
-        }
-        let metadata_mime = mime_type;
-        let task = cx
-            .background_executor()
-            .spawn(async move { discover_applications(&path, Some(&metadata_mime)) });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                let Some(chooser) = this
-                    .open_with_chooser
-                    .as_mut()
-                    .filter(|chooser| chooser.serial == serial)
-                else {
-                    return;
-                };
-                chooser.loading = false;
-                chooser.mime_type.clone_from(&result.mime_type);
-                chooser.selected_desktop_id = result
-                    .suggested
-                    .first()
-                    .or_else(|| result.all.first())
-                    .map(|application| application.desktop_id.clone());
-                chooser.catalog = Some(result.clone());
-                this.open_with_catalogs
-                    .insert(result.mime_type.clone(), result);
-                cx.notify();
-            });
-        })
-        .detach();
         cx.notify();
+        serial
     }
 
     fn dismiss_open_with(
@@ -297,7 +416,12 @@ impl FileManager {
             };
             (submenu.path.clone(), false, submenu.mime_type.clone())
         };
-        match launch_application(&application, &path) {
+        let launch_result = if always_use {
+            launch_safe_default(&application, &path, &mime_type)
+        } else {
+            launch_application(&application, &path)
+        };
+        match launch_result {
             Ok(()) => {
                 self.status_message = Some(format!("Opened with {}", application.name));
                 if from_chooser {
@@ -305,8 +429,10 @@ impl FileManager {
                 } else {
                     self.action_menu = None;
                 }
-                if always_use && mime_type != "application/octet-stream" {
-                    self.open_with_catalogs.remove(&mime_type);
+                if always_use
+                    && application.declared_compatible
+                    && mime_type != "application/octet-stream"
+                {
                     let app_name = application.name.clone();
                     let task = cx.background_executor().spawn(async move {
                         set_default_application(&application, &mime_type)
@@ -377,6 +503,12 @@ impl FileManager {
         };
         if let Some(chooser) = self.open_with_chooser.as_mut() {
             chooser.selected_desktop_id = Some(applications[index].clone());
+            if !chooser
+                .application(&applications[index])
+                .is_some_and(|application| application.declared_compatible)
+            {
+                chooser.always_use = false;
+            }
             cx.notify();
         }
     }
@@ -387,10 +519,12 @@ impl FileManager {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(chooser) = self
+        let can_set_default = self
             .open_with_chooser
-            .as_mut()
-            .filter(|chooser| chooser.mime_type != "application/octet-stream")
+            .as_ref()
+            .is_some_and(OpenWithChooserState::can_set_default);
+        if can_set_default
+            && let Some(chooser) = self.open_with_chooser.as_mut()
         {
             chooser.always_use = !chooser.always_use;
             cx.notify();

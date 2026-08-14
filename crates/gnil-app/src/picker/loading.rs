@@ -7,7 +7,8 @@ impl Picker {
         cx: &mut Context<Self>,
     ) -> Self {
         load_picker_theme(window);
-        let settings = ConfigPaths::discover().load_settings().unwrap_or_default();
+        let config_paths = ConfigPaths::discover();
+        let settings = config_paths.load_settings().unwrap_or_default();
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let (suggested_dir, suggested_name, filters, active_filter, choices) =
             request_initial_state(&request, &home);
@@ -55,6 +56,8 @@ impl Picker {
             error: None,
             status,
             generation: 0,
+            file_layout: settings.file_layout,
+            config_paths,
             show_hidden: settings.show_hidden,
             path_editing: false,
             path_input,

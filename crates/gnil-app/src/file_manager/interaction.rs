@@ -25,6 +25,10 @@ impl FileManager {
             self.dismiss_file_search(&DismissFileSearch, window, cx);
             return;
         }
+        if self.operations_menu_open {
+            self.dismiss_operations_menu(cx);
+            return;
+        }
         if self.operation_sheet.is_some() {
             self.dismiss_sheet(&DismissSheet, window, cx);
             window.focus(&self.focus_handle(cx));
@@ -192,9 +196,9 @@ impl FileManager {
         Arc::clone(&self.selected_paths_cache)
     }
 
-    fn open_selected(&mut self, _: &OpenSelected, _: &mut Window, cx: &mut Context<Self>) {
+    fn open_selected(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.selection.cursor {
-            self.open_index(index, cx);
+            self.open_index(index, window, cx);
         }
     }
 
@@ -218,6 +222,7 @@ impl FileManager {
 
     fn toggle_preview(&mut self, _: &TogglePreview, _: &mut Window, cx: &mut Context<Self>) {
         self.preview_visible = !self.preview_visible;
+        self.settings.preview_enabled = self.preview_visible;
         if self.preview_visible {
             self.load_preview(cx);
         } else {
@@ -225,6 +230,7 @@ impl FileManager {
         }
         self.invalidate_surfaces(SurfaceMask::COMMAND_BAR | SurfaceMask::FILE_LIST, cx);
         cx.notify();
+        self.save_settings(cx);
     }
 
     fn toggle_hidden(&mut self, _: &ToggleHidden, _: &mut Window, cx: &mut Context<Self>) {
@@ -232,6 +238,8 @@ impl FileManager {
             return;
         }
         self.tab.show_hidden = !self.tab.show_hidden;
+        self.settings.show_hidden = self.tab.show_hidden;
+        self.save_settings(cx);
         self.load_directory(cx);
     }
 
@@ -569,7 +577,7 @@ impl FileManager {
         self.preview_cache
             .lock()
             .expect("preview cache lock poisoned")
-            .set_capacity_mib(self.settings.memory_cache_mib);
+            .set_capacity_mib(self.settings.memory_cache_mib / 4);
         if layout_changed {
             self.file_list_scroll = UniformListScrollHandle::new();
             self.rendered_file_range = 0..0;
@@ -674,13 +682,17 @@ impl FileManager {
     fn save_settings(&mut self, cx: &mut Context<Self>) {
         let settings = self.settings.clone();
         let config_paths = self.config_paths.clone();
-        self.preferences.update(cx, |preferences, cx| {
+        self.preferences.update(cx, |preferences, _| {
             preferences.config_paths = config_paths;
             if let Err(error) = preferences.save_settings(settings) {
                 eprintln!("Could not save settings: {error}");
             }
-            cx.notify();
         });
+        let preferences = self.preferences.clone();
+        cx.spawn(async move |_, cx| {
+            let _ = preferences.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
     }
 
     fn selected_favorite_candidate(&self) -> Option<PathBuf> {
@@ -846,7 +858,7 @@ impl FileManager {
             &self.snapshot.entries,
             &self.settings.favorites,
             clipboard_valid,
-            self.operation_running,
+            false,
         );
         self.action_menu_serial = self.action_menu_serial.wrapping_add(1);
         self.action_menu = Some(ActionMenuState::new(
@@ -898,7 +910,7 @@ impl FileManager {
         let context = EmptySpaceMenuContext {
             capabilities: EmptySpaceMenuCapabilities {
                 clipboard_valid: self.file_clipboard_from_system(cx).is_some(),
-                operation_running: self.operation_running,
+                operation_running: false,
                 has_entries: !self.snapshot.entries.is_empty(),
             },
             sort: self.tab.sort,
@@ -1201,7 +1213,7 @@ impl FileManager {
                         .iter()
                         .position(|entry| &entry.path == path)
                 {
-                    self.open_index(index, cx);
+                    self.open_index(index, window, cx);
                 }
             }
             FileMenuCommand::Extract => {

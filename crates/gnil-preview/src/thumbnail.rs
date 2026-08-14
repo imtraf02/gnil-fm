@@ -1,24 +1,34 @@
 use std::{
     env,
     ffi::OsStr,
-    fs::{self, File},
-    io::{self, BufReader, BufWriter},
+    fs::{self, File, OpenOptions},
+    io::{self, BufReader, BufWriter, Seek as _},
+    os::unix::{
+        fs::{MetadataExt as _, OpenOptionsExt as _},
+        process::CommandExt as _,
+    },
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
-use image::{ImageReader, imageops::FilterType};
+use image::{ImageReader, Limits, imageops::FilterType};
 use md5::{Digest as _, Md5};
+use nix::{
+    sys::signal::{Signal, killpg},
+    unistd::Pid,
+};
 use thiserror::Error;
 use url::Url;
 
-use crate::MAX_IMAGE_PIXELS;
+use crate::{MAX_ENCODED_IMAGE_BYTES, MAX_IMAGE_PIXELS};
 
 const THUMBNAIL_SIZE: u32 = 256;
+const PREVIEW_SIZE: u32 = 1024;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_HELPER_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThumbnailRequest {
@@ -32,6 +42,14 @@ impl ThumbnailRequest {
         Self {
             path,
             size: THUMBNAIL_SIZE,
+        }
+    }
+
+    #[must_use]
+    pub fn preview(path: PathBuf) -> Self {
+        Self {
+            path,
+            size: PREVIEW_SIZE,
         }
     }
 }
@@ -155,6 +173,43 @@ fn ensure_not_cancelled(cancelled: &AtomicBool) -> Result<(), ThumbnailError> {
     }
 }
 
+fn image_limits() -> Limits {
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(MAX_IMAGE_PIXELS.saturating_mul(4));
+    limits
+}
+
+pub(crate) fn open_bounded_regular_file(path: &Path, max_bytes: u64) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "thumbnail input is not a regular file",
+        ));
+    }
+    if metadata.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("thumbnail input exceeds {max_bytes} bytes"),
+        ));
+    }
+    Ok(file)
+}
+
+fn metadata_changed(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    before.dev() != after.dev()
+        || before.ino() != after.ino()
+        || before.len() != after.len()
+        || before.mtime() != after.mtime()
+        || before.mtime_nsec() != after.mtime_nsec()
+}
+
 fn file_uri(path: &Path) -> Result<String, ThumbnailError> {
     let absolute = path.canonicalize()?;
     Url::from_file_path(&absolute)
@@ -213,10 +268,12 @@ fn create_image_thumbnail(
     cancelled: &AtomicBool,
 ) -> Result<(), ThumbnailError> {
     ensure_not_cancelled(cancelled)?;
-    let reader = ImageReader::open(source)?
+    let mut file = open_bounded_regular_file(source, MAX_ENCODED_IMAGE_BYTES)?;
+    let before = file.metadata()?;
+    let dimensions_reader = ImageReader::new(BufReader::new(file.try_clone()?))
         .with_guessed_format()
         .map_err(|error| ThumbnailError::Image(error.to_string()))?;
-    let (width, height) = reader
+    let (width, height) = dimensions_reader
         .into_dimensions()
         .map_err(|error| ThumbnailError::Image(error.to_string()))?;
     if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
@@ -224,8 +281,21 @@ fn create_image_thumbnail(
             "image exceeds the safe decode limit".into(),
         ));
     }
+    file.rewind()?;
     ensure_not_cancelled(cancelled)?;
-    let image = image::open(source).map_err(|error| ThumbnailError::Image(error.to_string()))?;
+    let mut reader = ImageReader::new(BufReader::new(file.try_clone()?))
+        .with_guessed_format()
+        .map_err(|error| ThumbnailError::Image(error.to_string()))?;
+    reader.limits(image_limits());
+    let image = reader
+        .decode()
+        .map_err(|error| ThumbnailError::Image(error.to_string()))?;
+    let after = file.metadata()?;
+    if metadata_changed(&before, &after) {
+        return Err(ThumbnailError::Image(
+            "image changed while generating its thumbnail".into(),
+        ));
+    }
     let thumbnail = image
         .resize(requested_size, requested_size, FilterType::Triangle)
         .to_rgba8();
@@ -349,7 +419,10 @@ fn run_thumbnailer(
     cancelled: &AtomicBool,
 ) -> Result<(), ThumbnailError> {
     ensure_not_cancelled(cancelled)?;
-    let output = temporary_path(destination, "helper");
+    let output_directory = tempfile::Builder::new()
+        .prefix(".gnil-thumbnail-helper-")
+        .tempdir_in(destination.parent().unwrap_or_else(|| Path::new(".")))?;
+    let output = output_directory.path().join("thumbnail.png");
     let arguments = shlex::split(&entry.exec)
         .ok_or_else(|| ThumbnailError::InvalidEntry("Exec has invalid quoting".into()))?;
     let Some((program, arguments)) = arguments.split_first() else {
@@ -362,27 +435,47 @@ fn run_thumbnailer(
         .iter()
         .map(|argument| expand_exec_argument(argument, &input, uri, &output_text, &size))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut child = Command::new(program).args(expanded).spawn()?;
-    if let Err(error) = wait_for_helper(&mut child, cancelled) {
-        let _ = fs::remove_file(&output);
-        return Err(error);
-    }
+    let mut command = Command::new(program);
+    command
+        .args(expanded)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let mut child = command.spawn()?;
+    wait_for_helper(&mut child, cancelled)?;
     ensure_not_cancelled(cancelled)?;
-    let rendered =
-        image::open(&output).map_err(|error| ThumbnailError::Image(error.to_string()))?;
+    let output_file = open_bounded_regular_file(&output, MAX_HELPER_OUTPUT_BYTES)?;
+    let mut reader = ImageReader::new(BufReader::new(output_file))
+        .with_guessed_format()
+        .map_err(|error| ThumbnailError::Image(error.to_string()))?;
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|error| ThumbnailError::Image(error.to_string()))?;
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+        return Err(ThumbnailError::Image(
+            "thumbnail helper output exceeds the pixel limit".into(),
+        ));
+    }
+    let output_file = open_bounded_regular_file(&output, MAX_HELPER_OUTPUT_BYTES)?;
+    reader = ImageReader::new(BufReader::new(output_file))
+        .with_guessed_format()
+        .map_err(|error| ThumbnailError::Image(error.to_string()))?;
+    reader.limits(image_limits());
+    let rendered = reader
+        .decode()
+        .map_err(|error| ThumbnailError::Image(error.to_string()))?;
     let rendered = rendered
         .resize(request.size, request.size, FilterType::Triangle)
         .to_rgba8();
-    let result = write_thumbnail(
+    write_thumbnail(
         destination,
         &rendered,
         uri,
         modified,
         source_size,
         cancelled,
-    );
-    let _ = fs::remove_file(output);
-    result
+    )
 }
 
 fn expand_exec_argument(
@@ -424,8 +517,7 @@ fn wait_for_helper(child: &mut Child, cancelled: &AtomicBool) -> Result<(), Thum
     let started = Instant::now();
     loop {
         if cancelled.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_helper(child);
             return Err(ThumbnailError::Cancelled);
         }
         if let Some(status) = child.try_wait()? {
@@ -438,19 +530,19 @@ fn wait_for_helper(child: &mut Child, cancelled: &AtomicBool) -> Result<(), Thum
             };
         }
         if started.elapsed() >= HELPER_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_helper(child);
             return Err(ThumbnailError::TimedOut);
         }
         thread::sleep(Duration::from_millis(20));
     }
 }
 
-fn temporary_path(destination: &Path, suffix: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    destination.with_extension(format!("png.{suffix}.{}.{nonce}", std::process::id()))
+fn terminate_helper(child: &mut Child) {
+    if let Ok(pid) = i32::try_from(child.id()) {
+        let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn write_thumbnail(
@@ -462,34 +554,46 @@ fn write_thumbnail(
     cancelled: &AtomicBool,
 ) -> Result<(), ThumbnailError> {
     ensure_not_cancelled(cancelled)?;
-    let temporary = temporary_path(destination, "tmp");
-    let file = File::create(&temporary)?;
-    let mut encoder = png::Encoder::new(BufWriter::new(file), image.width(), image.height());
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder
-        .add_text_chunk("Thumb::URI".into(), uri.into())
-        .map_err(|error| ThumbnailError::Png(error.to_string()))?;
-    encoder
-        .add_text_chunk("Thumb::MTime".into(), modified.to_string())
-        .map_err(|error| ThumbnailError::Png(error.to_string()))?;
-    encoder
-        .add_text_chunk("Thumb::Size".into(), source_size.to_string())
-        .map_err(|error| ThumbnailError::Png(error.to_string()))?;
-    encoder
-        .add_text_chunk("Software".into(), "gnil-fm".into())
-        .map_err(|error| ThumbnailError::Png(error.to_string()))?;
-    let mut writer = encoder
-        .write_header()
-        .map_err(|error| ThumbnailError::Png(error.to_string()))?;
-    writer
-        .write_image_data(image.as_raw())
-        .map_err(|error| ThumbnailError::Png(error.to_string()))?;
-    writer
-        .finish()
-        .map_err(|error| ThumbnailError::Png(error.to_string()))?;
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".gnil-thumbnail-")
+        .suffix(".png")
+        .tempfile_in(parent)?;
+    {
+        let mut encoder = png::Encoder::new(
+            BufWriter::new(temporary.as_file_mut()),
+            image.width(),
+            image.height(),
+        );
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .add_text_chunk("Thumb::URI".into(), uri.into())
+            .map_err(|error| ThumbnailError::Png(error.to_string()))?;
+        encoder
+            .add_text_chunk("Thumb::MTime".into(), modified.to_string())
+            .map_err(|error| ThumbnailError::Png(error.to_string()))?;
+        encoder
+            .add_text_chunk("Thumb::Size".into(), source_size.to_string())
+            .map_err(|error| ThumbnailError::Png(error.to_string()))?;
+        encoder
+            .add_text_chunk("Software".into(), "gnil-fm".into())
+            .map_err(|error| ThumbnailError::Png(error.to_string()))?;
+        let mut writer = encoder
+            .write_header()
+            .map_err(|error| ThumbnailError::Png(error.to_string()))?;
+        writer
+            .write_image_data(image.as_raw())
+            .map_err(|error| ThumbnailError::Png(error.to_string()))?;
+        writer
+            .finish()
+            .map_err(|error| ThumbnailError::Png(error.to_string()))?;
+    }
+    temporary.as_file().sync_all()?;
     ensure_not_cancelled(cancelled)?;
-    fs::rename(temporary, destination)?;
+    temporary
+        .persist(destination)
+        .map_err(|error| ThumbnailError::Io(error.error))?;
     Ok(())
 }
 

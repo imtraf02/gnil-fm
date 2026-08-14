@@ -90,61 +90,48 @@ pub struct PermissionUndo {
     pub after: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct FileFingerprint {
-    pub len: u64,
-    pub modified_unix_ms: Option<i64>,
-}
-
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-pub enum ExtractedEntryKind {
+pub enum TreeEntryKind {
     File,
     Directory,
     Symlink { target: PathBuf },
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-pub struct ExtractedEntryFingerprint {
+pub struct TreeEntryFingerprint {
     pub relative_path: PathBuf,
-    pub kind: ExtractedEntryKind,
+    pub kind: TreeEntryKind,
+    pub device: u64,
+    pub inode: u64,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
     pub len: u64,
-    pub modified_unix_ms: Option<i64>,
+    pub modified_seconds: i64,
+    pub modified_nanoseconds: i64,
+    pub content_blake3: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ExtractedTreeFingerprint {
+pub struct TreeFingerprint {
     pub root: PathBuf,
-    pub entries: Vec<ExtractedEntryFingerprint>,
+    pub entries: Vec<TreeEntryFingerprint>,
 }
+
+pub type ExtractedEntryKind = TreeEntryKind;
+pub type ExtractedEntryFingerprint = TreeEntryFingerprint;
+pub type ExtractedTreeFingerprint = TreeFingerprint;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum UndoKind {
-    RemoveCreated {
-        paths: Vec<(PathBuf, FileFingerprint)>,
-    },
-    RenameBack {
-        from: PathBuf,
-        to: PathBuf,
-    },
-    BulkRenameBack {
-        pairs: Vec<RenamePair>,
-    },
-    RemoveSymlink {
-        link_path: PathBuf,
-        target: PathBuf,
-    },
-    RestorePermissions {
-        entries: Vec<PermissionUndo>,
-    },
-    MoveBack {
-        pairs: Vec<(PathBuf, PathBuf)>,
-    },
-    RestoreTrash {
-        original_paths: Vec<PathBuf>,
-    },
-    RemoveExtracted {
-        trees: Vec<ExtractedTreeFingerprint>,
-    },
+    RemoveCreated { trees: Vec<TreeFingerprint> },
+    RenameBack { from: PathBuf, to: PathBuf },
+    BulkRenameBack { pairs: Vec<RenamePair> },
+    RemoveSymlink { link_path: PathBuf, target: PathBuf },
+    RestorePermissions { entries: Vec<PermissionUndo> },
+    MoveBack { pairs: Vec<(PathBuf, PathBuf)> },
+    RestoreTrash { original_paths: Vec<PathBuf> },
+    RemoveExtracted { trees: Vec<TreeFingerprint> },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -157,5 +144,12 @@ pub struct UndoRecord {
 pub struct OperationOutcome {
     pub affected_paths: Vec<PathBuf>,
     pub skipped_paths: Vec<PathBuf>,
+    pub issues: Vec<OperationIssue>,
     pub undo: Option<UndoRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OperationIssue {
+    pub path: PathBuf,
+    pub message: String,
 }

@@ -18,7 +18,7 @@ impl FileManager {
         };
         let labels = self.command_bar_width_tier == CommandBarWidthTier::Full;
         let has_selection = self.selection.selected_count() > 0;
-        let writes_enabled = !self.operation_running;
+        let writes_enabled = true;
         let clipboard_valid = self.file_clipboard_from_system(cx).is_some();
 
         let mut bar = div()

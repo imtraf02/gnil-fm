@@ -1,20 +1,17 @@
 use std::{
     collections::HashSet,
     ffi::{OsStr, OsString},
-    fs::{self, File, FileTimes, OpenOptions},
+    fs::{self, File, FileTimes},
     io::{self, BufReader, Read, Write},
-    os::unix::fs::PermissionsExt as _,
+    os::unix::fs::{MetadataExt as _, PermissionsExt as _},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::SystemTime,
 };
 
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
-use gnil_core::{
-    ExtractedEntryFingerprint, ExtractedEntryKind, ExtractedTreeFingerprint, JobProgress,
-    OperationOutcome, UndoKind, UndoRecord,
-};
+use gnil_core::{ExtractedTreeFingerprint, JobProgress, OperationOutcome, UndoKind, UndoRecord};
 use libarchive2::{CallbackReader, FileType, ReadArchive};
 use nix::{
     errno::Errno,
@@ -25,8 +22,12 @@ use thiserror::Error;
 use uuid::Uuid;
 use xz2::read::XzDecoder;
 
+use crate::{
+    fingerprint::{self, FingerprintError, MAX_UNDO_ENTRIES},
+    secure_fs,
+};
+
 const MAX_ENTRIES: usize = 250_000;
-const MAX_UNDO_ENTRIES: usize = 50_000;
 const FREE_SPACE_RESERVE: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
@@ -104,10 +105,8 @@ pub fn extract_archives(
     cancelled: &AtomicBool,
     progress: &mut dyn FnMut(JobProgress),
 ) -> Result<OperationOutcome, ArchiveError> {
-    let destination_metadata = fs::metadata(destination)?;
-    if !destination_metadata.is_dir() {
-        return Err(ArchiveError::Unsupported(destination.to_path_buf()));
-    }
+    secure_fs::open_dir(destination)
+        .map_err(|_| ArchiveError::Unsupported(destination.to_path_buf()))?;
 
     let mut plans = Vec::with_capacity(sources.len());
     let mut total_entries = 0usize;
@@ -161,7 +160,9 @@ pub fn extract_archives(
                 },
             )
         } else {
-            fs::create_dir(&staging_path)
+            secure_fs::open_parent(&staging_path)
+                .and_then(|parent| secure_fs::create_dir(&parent, 0o700))
+                .map(drop)
                 .map_err(ArchiveError::from)
                 .and_then(|()| {
                     extract_multi(
@@ -224,6 +225,7 @@ pub fn extract_archives(
     Ok(OperationOutcome {
         affected_paths,
         skipped_paths: Vec::new(),
+        issues: Vec::new(),
         undo,
     })
 }
@@ -387,7 +389,7 @@ fn extract_multi(
         ensure_safe_parent(staging, &output)?;
         match expected.kind {
             EntryKind::Directory => {
-                fs::create_dir_all(&output)?;
+                secure_fs::ensure_dir(&output, 0o700)?;
                 directories.push((output.clone(), expected.mode, expected.mtime));
                 archive
                     .skip_data()
@@ -395,16 +397,15 @@ fn extract_multi(
             }
             EntryKind::Symlink => {
                 let target = expected.link_target.as_ref().expect("validated symlink");
-                std::os::unix::fs::symlink(target, &output)?;
+                let parent = secure_fs::open_parent(&output)?;
+                secure_fs::create_symlink(target.as_os_str(), &parent)?;
                 archive
                     .skip_data()
                     .map_err(|_| ArchiveError::Unreadable(plan.source.clone()))?;
             }
             EntryKind::File => {
-                let mut file = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&output)?;
+                let parent = secure_fs::open_parent(&output)?;
+                let mut file = File::from(secure_fs::create_file(&parent, 0o600)?);
                 let mut buffer = vec![0u8; 64 * 1024];
                 loop {
                     check_cancelled(cancelled)?;
@@ -446,8 +447,10 @@ fn extract_multi(
     }
     directories.sort_by_key(|(path, _, _)| std::cmp::Reverse(path.components().count()));
     for (path, mode, mtime) in directories {
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
-        let file = File::open(path)?;
+        let metadata = fs::symlink_metadata(&path)?;
+        secure_fs::chmod_nofollow(&path, mode, (metadata.dev(), metadata.ino()))?;
+        let parent = secure_fs::open_parent(&path)?;
+        let file = File::from(secure_fs::open_file_readonly(&parent)?);
         set_mtime(&file, mtime)?;
     }
     Ok(())
@@ -461,7 +464,8 @@ fn extract_stream(
     written: &mut u64,
     mut report: impl FnMut(u64, u64, PathBuf),
 ) -> Result<(), ArchiveError> {
-    let source = File::open(&plan.source)?;
+    let source_parent = secure_fs::open_parent(&plan.source)?;
+    let source = File::from(secure_fs::open_file_readonly(&source_parent)?);
     let reader: Box<dyn Read> = match kind {
         StreamKind::Gzip => Box::new(GzDecoder::new(BufReader::new(source))),
         StreamKind::Bzip2 => Box::new(BzDecoder::new(BufReader::new(source))),
@@ -469,10 +473,8 @@ fn extract_stream(
         StreamKind::Zstd => Box::new(zstd::stream::read::Decoder::new(BufReader::new(source))?),
     };
     let mut reader = reader;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(staging)?;
+    let staging_parent = secure_fs::open_parent(staging)?;
+    let mut output = File::from(secure_fs::create_file(&staging_parent, 0o600)?);
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
         check_cancelled(cancelled)?;
@@ -496,7 +498,8 @@ fn extract_stream(
 }
 
 fn open_archive(path: &Path) -> Result<ReadArchive<'static>, ArchiveError> {
-    let file = File::open(path)?;
+    let parent = secure_fs::open_parent(path)?;
+    let file = File::from(secure_fs::open_file_readonly(&parent)?);
     ReadArchive::open_callback(CallbackReader::new(BufReader::new(file)))
         .map_err(|_| ArchiveError::Unreadable(path.to_path_buf()))
 }
@@ -585,21 +588,22 @@ fn stripped_path(path: &Path, root: Option<&OsStr>) -> PathBuf {
 
 fn ensure_safe_parent(root: &Path, output: &Path) -> Result<(), ArchiveError> {
     let parent = output.parent().unwrap_or(root);
-    fs::create_dir_all(parent)?;
     let relative = parent
         .strip_prefix(root)
         .map_err(|_| ArchiveError::UnsafeEntry {
             archive: root.to_path_buf(),
             reason: "output escaped staging".into(),
         })?;
-    let mut cursor = root.to_path_buf();
-    for component in relative.components() {
-        cursor.push(component);
-        let metadata = fs::symlink_metadata(&cursor)?;
-        if metadata.file_type().is_symlink() {
-            return unsafe_entry(root, "output parent is a symlink");
-        }
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        return unsafe_entry(root, "output parent contains an unsafe component");
     }
+    secure_fs::ensure_dir(parent, 0o700).map_err(|_| ArchiveError::UnsafeEntry {
+        archive: root.to_path_buf(),
+        reason: "output parent is not a safe directory".into(),
+    })?;
     Ok(())
 }
 
@@ -619,7 +623,7 @@ fn commit_keep_both(
     destination: &Path,
     requested_name: &OsStr,
 ) -> Result<PathBuf, ArchiveError> {
-    let directory = File::open(destination)?;
+    let directory = File::from(secure_fs::open_dir(destination)?);
     let staging_name = staging
         .file_name()
         .ok_or_else(|| ArchiveError::Commit(staging.to_path_buf()))?;
@@ -671,73 +675,16 @@ fn fingerprint_outputs(
     paths: &[PathBuf],
     limit: usize,
 ) -> Result<Option<Vec<ExtractedTreeFingerprint>>, ArchiveError> {
-    let mut remaining = limit;
-    let mut overflowed = false;
-    let mut trees = Vec::with_capacity(paths.len());
-    for root in paths {
-        let mut entries = Vec::new();
-        fingerprint_path(root, root, &mut entries, &mut remaining, &mut overflowed)?;
-        if overflowed {
-            return Ok(None);
-        }
-        trees.push(ExtractedTreeFingerprint {
-            root: root.clone(),
-            entries,
-        });
-    }
-    Ok(Some(trees))
-}
-
-fn fingerprint_path(
-    root: &Path,
-    path: &Path,
-    entries: &mut Vec<ExtractedEntryFingerprint>,
-    remaining: &mut usize,
-    overflowed: &mut bool,
-) -> Result<(), ArchiveError> {
-    if *remaining == 0 {
-        *overflowed = true;
-        return Ok(());
-    }
-    *remaining -= 1;
-    let metadata = fs::symlink_metadata(path)?;
-    let kind = if metadata.file_type().is_symlink() {
-        ExtractedEntryKind::Symlink {
-            target: fs::read_link(path)?,
-        }
-    } else if metadata.is_dir() {
-        ExtractedEntryKind::Directory
-    } else {
-        ExtractedEntryKind::File
-    };
-    entries.push(ExtractedEntryFingerprint {
-        relative_path: path
-            .strip_prefix(root)
-            .unwrap_or(Path::new(""))
-            .to_path_buf(),
-        kind,
-        len: metadata.len(),
-        modified_unix_ms: metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .and_then(|duration| i64::try_from(duration.as_millis()).ok()),
-    });
-    if metadata.is_dir() {
-        for child in fs::read_dir(path)? {
-            fingerprint_path(root, &child?.path(), entries, remaining, overflowed)?;
-            if *overflowed {
-                break;
-            }
-        }
-    }
-    Ok(())
+    fingerprint::fingerprint_trees(paths, limit).map_err(map_fingerprint_error)
 }
 
 fn rollback_committed(committed: &[(PathBuf, PathBuf)]) -> Result<(), ArchiveError> {
     let mut errors = Vec::new();
     for (final_path, staging) in committed.iter().rev() {
-        if let Err(error) = fs::rename(final_path, staging) {
+        let result = secure_fs::open_parent(final_path).and_then(|from| {
+            secure_fs::open_parent(staging).and_then(|to| secure_fs::rename_noreplace(&from, &to))
+        });
+        if let Err(error) = result {
             errors.push(format!("{}: {error}", final_path.display()));
         }
     }
@@ -755,14 +702,10 @@ fn cleanup_staged(staged: &[StagedOutput]) {
 }
 
 fn remove_if_exists(path: &Path) {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
+    let Ok(parent) = secure_fs::open_parent(path) else {
         return;
     };
-    let _ = if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    };
+    let _ = secure_fs::remove_tree(&parent);
 }
 
 fn check_cancelled(cancelled: &AtomicBool) -> Result<(), ArchiveError> {
@@ -780,31 +723,23 @@ fn unsafe_entry<T>(archive: &Path, reason: &str) -> Result<T, ArchiveError> {
     })
 }
 
-pub fn verify_extracted_trees(trees: &[ExtractedTreeFingerprint]) -> Result<(), ArchiveError> {
-    for tree in trees {
-        let actual = fingerprint_outputs(std::slice::from_ref(&tree.root), tree.entries.len() + 1)?
-            .and_then(|mut trees| trees.pop())
-            .ok_or_else(|| ArchiveError::Commit(tree.root.clone()))?;
-        let expected: HashSet<_> = tree.entries.iter().cloned().collect();
-        let actual: HashSet<_> = actual.entries.into_iter().collect();
-        if expected != actual {
-            return Err(ArchiveError::Commit(tree.root.clone()));
-        }
-    }
-    Ok(())
+#[cfg(test)]
+fn remove_extracted_trees(trees: &[ExtractedTreeFingerprint]) -> Result<(), ArchiveError> {
+    fingerprint::quarantine_and_remove(trees).map_err(map_fingerprint_error)
 }
 
-pub fn remove_extracted_trees(trees: &[ExtractedTreeFingerprint]) -> Result<(), ArchiveError> {
-    verify_extracted_trees(trees)?;
-    for tree in trees.iter().rev() {
-        let metadata = fs::symlink_metadata(&tree.root)?;
-        if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            fs::remove_dir_all(&tree.root)?;
-        } else {
-            fs::remove_file(&tree.root)?;
-        }
+fn map_fingerprint_error(error: FingerprintError) -> ArchiveError {
+    match error {
+        FingerprintError::Io(error) => ArchiveError::Io(error),
+        FingerprintError::Conflict(path) => ArchiveError::Commit(path),
+        FingerprintError::Recovery(paths) => ArchiveError::Rollback(
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
     }
-    Ok(())
 }
 
 #[cfg(test)]

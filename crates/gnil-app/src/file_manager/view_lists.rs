@@ -37,7 +37,6 @@ impl FileManager {
             self.rendered_file_range = 0..0;
         }
         let sort = self.tab.sort;
-        let operation_running = self.operation_running;
         let name_column_width = self.detail_column_width(DetailColumn::Name);
         let modified_column_width = self.detail_column_width(DetailColumn::Modified);
         let type_column_width = self.detail_column_width(DetailColumn::Kind);
@@ -181,7 +180,7 @@ impl FileManager {
                                         );
                                     }),
                                 )
-                                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                                     let opens_directory = event.click_count() >= 2
                                         && this
                                             .snapshot
@@ -190,10 +189,10 @@ impl FileManager {
                                             .is_some_and(FileEntry::is_directory_like);
                                     this.select_from_click(index, event, !opens_directory, cx);
                                     if event.click_count() >= 2 {
-                                        this.open_index(index, cx);
+                                        this.open_index(index, window, cx);
                                     }
                                 }))
-                                .when(!operation_running && !renaming, |row| {
+                                .when(!renaming, |row| {
                                     row.on_drag(drag_payload, |payload, cursor_offset, _, cx| {
                                         cx.new(|_| DragGhost {
                                             payload: payload.clone(),
@@ -208,7 +207,7 @@ impl FileManager {
                                     let internal_drop_target = drop_target.clone();
                                     let external_drop_target = drop_target.clone();
                                     row.can_drop(move |value, _, _| {
-                                        can_drop_value(value, &predicate_target, operation_running)
+                                        can_drop_value(value, &predicate_target)
                                     })
                                     .drag_over::<FileDragPayload>(|style, _, _, _| {
                                         style
@@ -525,7 +524,7 @@ impl FileManager {
                     .min_h_0()
                     .can_drop(move |value, _, _| {
                         value.downcast_ref::<ExternalPaths>().is_some_and(|paths| {
-                            can_external_drop_value(paths, &predicate_target, operation_running)
+                            can_external_drop_value(paths, &predicate_target)
                         })
                     })
                     .drag_over::<ExternalPaths>(|style, _, _, _| {

@@ -10,7 +10,8 @@ impl FileManager {
         let loading = chooser.loading;
         let error = chooser.error.clone();
         let always_use = chooser.always_use;
-        let default_supported = chooser.mime_type != "application/octet-stream";
+        let known_mime = chooser.mime_type != "application/octet-stream";
+        let default_supported = chooser.can_set_default();
         let file_name = chooser.file_name.clone();
         let mime_type = chooser.mime_type.clone();
         let motion = chooser.motion;
@@ -226,15 +227,13 @@ impl FileManager {
                             })
                             .child(setting_switch(always_use && default_supported))
                             .child(
-                                div()
-                                    .child("Always use this app")
-                                    .when(!default_supported, |label| {
-                                        label.child(
-                                            div()
-                                                .text_color(rgb(text_muted()))
-                                                .child("Unavailable for unknown file types"),
-                                        )
-                                    }),
+                                div().child(if default_supported {
+                                    "Always use this app"
+                                } else if known_mime {
+                                    "App does not declare support for this file type"
+                                } else {
+                                    "Unavailable for unknown file types"
+                                }),
                             ),
                     )
                     .child(
@@ -301,6 +300,7 @@ impl FileManager {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let desktop_id = application.desktop_id.clone();
+        let declared_compatible = application.declared_compatible;
         let is_selected = selected == Some(desktop_id.as_str());
         div()
             .id(SharedString::from(format!(
@@ -330,6 +330,9 @@ impl FileManager {
             .on_click(cx.listener(move |this, _, _, cx| {
                 if let Some(chooser) = this.open_with_chooser.as_mut() {
                     chooser.selected_desktop_id = Some(desktop_id.clone());
+                    if !declared_compatible {
+                        chooser.always_use = false;
+                    }
                     cx.notify();
                 }
             }))

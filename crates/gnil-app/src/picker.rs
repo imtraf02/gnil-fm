@@ -4,6 +4,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     hash::{DefaultHasher, Hash as _, Hasher as _},
+    io::{self, Read as _},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -15,7 +16,7 @@ use std::{
 
 use gnil_core::{
     ConfigPaths, DirectoryLoadPhase, DirectorySnapshot, EntryMetadata, FileEntry, FileKind,
-    FileMetadata, SortSpec, ThemeAppearance, ThemeCatalog, ThemeMode,
+    FileLayout, FileMetadata, SortSpec, ThemeAppearance, ThemeCatalog, ThemeMode,
 };
 use gnil_fs::{
     DirectoryWatcher, ScanOptions, WatchEvent, fuzzy_match_score, mount_device, scan_devices,
@@ -27,7 +28,7 @@ use gpui::{
     Subscription, Window, actions, anchored, deferred, div, img, point, prelude::*, px, rgb,
     uniform_list,
 };
-use quick_xml::{Reader, events::Event};
+use quick_xml::{Reader, XmlVersion, events::Event};
 use url::Url;
 
 use crate::{
@@ -211,6 +212,8 @@ struct Picker {
     error: Option<String>,
     status: Option<String>,
     generation: u64,
+    file_layout: FileLayout,
+    config_paths: ConfigPaths,
     show_hidden: bool,
     path_editing: bool,
     path_input: Entity<TextInput>,
@@ -275,7 +278,7 @@ impl Drop for Picker {
 }
 
 impl Render for Picker {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .key_context("Picker")
             .track_focus(&self.focus)
@@ -308,7 +311,7 @@ impl Render for Picker {
                             .flex_col()
                             .overflow_hidden()
                             .p_3()
-                            .child(self.render_file_list(cx)),
+                            .child(self.render_file_list(window, cx)),
                     ),
             )
             .child(self.render_footer(cx))

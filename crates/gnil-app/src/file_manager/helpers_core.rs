@@ -18,10 +18,9 @@ fn sanitized_external_paths(paths: &ExternalPaths) -> Vec<PathBuf> {
 fn can_internal_drop_value(
     payload: &FileDragPayload,
     target: &DropTarget,
-    operation_running: bool,
 ) -> bool {
     if !payload.visual.lifted()
-        || internal_drop_intent(payload, target, payload.visual.copy(), operation_running).is_err()
+        || internal_drop_intent(payload, target, payload.visual.copy(), false).is_err()
     {
         return false;
     }
@@ -42,10 +41,9 @@ fn can_internal_drop_value(
 fn can_external_drop_value(
     external: &ExternalPaths,
     target: &DropTarget,
-    operation_running: bool,
 ) -> bool {
     let paths = sanitized_external_paths(external);
-    if external_drop_intent(&paths, target, operation_running).is_err() {
+    if external_drop_intent(&paths, target, false).is_err() {
         return false;
     }
     match target {
@@ -56,13 +54,13 @@ fn can_external_drop_value(
     }
 }
 
-fn can_drop_value(value: &dyn std::any::Any, target: &DropTarget, operation_running: bool) -> bool {
+fn can_drop_value(value: &dyn std::any::Any, target: &DropTarget) -> bool {
     value
         .downcast_ref::<FileDragPayload>()
-        .is_some_and(|payload| can_internal_drop_value(payload, target, operation_running))
+        .is_some_and(|payload| can_internal_drop_value(payload, target))
         || value
             .downcast_ref::<ExternalPaths>()
-            .is_some_and(|paths| can_external_drop_value(paths, target, operation_running))
+            .is_some_and(|paths| can_external_drop_value(paths, target))
 }
 
 fn preview_content(path: &Path, preview: &PreviewResult) -> AnyElement {
@@ -78,34 +76,7 @@ fn preview_content(path: &Path, preview: &PreviewResult) -> AnyElement {
             .text_color(rgb(theme_text()))
             .child(format!("{} items", directory.child_count))
             .into_any_element(),
-        PreviewResult::Image(image) if image.decode_allowed => div()
-            .p_4()
-            .gap_3()
-            .flex()
-            .flex_col()
-            .items_center()
-            .child(
-                img(Arc::<Path>::from(path))
-                    .max_w_full()
-                    .max_h(px(270.0))
-                    .rounded_lg(),
-            )
-            .child(div().text_xs().text_color(rgb(text_muted())).child(format!(
-                "{} × {} · {}",
-                image.width,
-                image.height,
-                image.format.to_uppercase()
-            )))
-            .into_any_element(),
-        PreviewResult::Image(image) => div()
-            .p_4()
-            .text_sm()
-            .text_color(rgb(text_muted()))
-            .child(format!(
-                "{} × {} · too large to decode safely",
-                image.width, image.height
-            ))
-            .into_any_element(),
+        PreviewResult::Image(image) => image_preview_content(image),
         PreviewResult::Text(text) => {
             let plain = text
                 .lines
@@ -159,6 +130,45 @@ fn preview_content(path: &Path, preview: &PreviewResult) -> AnyElement {
                 .child(title),
         )
         .child(body)
+        .into_any_element()
+}
+
+fn image_preview_content(image: &gnil_preview::ImagePreview) -> AnyElement {
+    if let Some(thumbnail) = image
+        .decode_allowed
+        .then_some(image.thumbnail_path.as_deref())
+        .flatten()
+    {
+        return div()
+            .p_4()
+            .gap_3()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(
+                img(Arc::<Path>::from(thumbnail))
+                    .max_w_full()
+                    .max_h(px(270.0))
+                    .rounded_lg(),
+            )
+            .child(div().text_xs().text_color(rgb(text_muted())).child(format!(
+                "{} × {} · {}",
+                image.width,
+                image.height,
+                image.format.to_uppercase()
+            )))
+            .into_any_element();
+    }
+    let status = if image.decode_allowed {
+        "safe thumbnail unavailable"
+    } else {
+        "too large to decode safely"
+    };
+    div()
+        .p_4()
+        .text_sm()
+        .text_color(rgb(text_muted()))
+        .child(format!("{} × {} · {status}", image.width, image.height))
         .into_any_element()
 }
 

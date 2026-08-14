@@ -3,6 +3,7 @@
 use std::{
     alloc::{self, handle_alloc_error},
     cell::Cell,
+    mem::align_of,
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
     ptr::{self, NonNull},
@@ -25,23 +26,22 @@ struct Chunk {
     start: *mut u8,
     end: *mut u8,
     offset: *mut u8,
+    layout: alloc::Layout,
 }
 
 impl Drop for Chunk {
     fn drop(&mut self) {
         unsafe {
-            let chunk_size = self.end.offset_from_unsigned(self.start);
             // SAFETY: This succeeded during allocation.
-            let layout = alloc::Layout::from_size_align_unchecked(chunk_size, 1);
-            alloc::dealloc(self.start, layout);
+            alloc::dealloc(self.start, self.layout);
         }
     }
 }
 
 impl Chunk {
-    fn new(chunk_size: NonZeroUsize) -> Self {
+    fn new(chunk_size: NonZeroUsize, alignment: usize) -> Self {
         // this only fails if chunk_size is unreasonably huge
-        let layout = alloc::Layout::from_size_align(chunk_size.get(), 1).unwrap();
+        let layout = alloc::Layout::from_size_align(chunk_size.get(), alignment).unwrap();
         let start = unsafe { alloc::alloc(layout) };
         if start.is_null() {
             handle_alloc_error(layout);
@@ -51,19 +51,25 @@ impl Chunk {
             start,
             end,
             offset: start,
+            layout,
         }
     }
 
     fn allocate(&mut self, layout: alloc::Layout) -> Option<NonNull<u8>> {
-        let aligned = unsafe { self.offset.add(self.offset.align_offset(layout.align())) };
-        let next = unsafe { aligned.add(layout.size()) };
-
-        if next <= self.end {
-            self.offset = next;
-            NonNull::new(aligned)
-        } else {
-            None
+        let current = self.offset.addr();
+        let aligned = current.checked_add(layout.align() - 1)? & !(layout.align() - 1);
+        let padding = aligned.checked_sub(current)?;
+        let required = padding.checked_add(layout.size())?;
+        let remaining = unsafe { self.end.offset_from_unsigned(self.offset) };
+        if required > remaining {
+            return None;
         }
+
+        // SAFETY: `required <= remaining`, so both pointers stay within this allocation or
+        // exactly one byte past it.
+        let aligned = unsafe { self.offset.add(padding) };
+        self.offset = unsafe { aligned.add(layout.size()) };
+        NonNull::new(aligned)
     }
 
     fn reset(&mut self) {
@@ -89,7 +95,7 @@ impl Arena {
     pub fn new(chunk_size: usize) -> Self {
         let chunk_size = NonZeroUsize::try_from(chunk_size).unwrap();
         Self {
-            chunks: vec![Chunk::new(chunk_size)],
+            chunks: vec![Chunk::new(chunk_size, align_of::<u128>())],
             elements: Vec::new(),
             valid: Rc::new(Cell::new(true)),
             current_chunk_index: 0,
@@ -98,15 +104,15 @@ impl Arena {
     }
 
     pub fn capacity(&self) -> usize {
-        self.chunks.len() * self.chunk_size.get()
+        self.chunks.iter().map(|chunk| chunk.layout.size()).sum()
     }
 
     pub fn clear(&mut self) {
         self.valid.set(false);
         self.valid = Rc::new(Cell::new(true));
         self.elements.clear();
-        for chunk_index in 0..=self.current_chunk_index {
-            self.chunks[chunk_index].reset();
+        for chunk in &mut self.chunks {
+            chunk.reset();
         }
         self.current_chunk_index = 0;
     }
@@ -126,28 +132,32 @@ impl Arena {
         }
 
         let layout = alloc::Layout::new::<T>();
-        let mut current_chunk = &mut self.chunks[self.current_chunk_index];
-        let ptr = if let Some(ptr) = current_chunk.allocate(layout) {
+        let ptr = if layout.size() == 0 {
+            NonNull::<T>::dangling().cast::<u8>().as_ptr()
+        } else if let Some(ptr) = self.chunks[self.current_chunk_index].allocate(layout) {
             ptr.as_ptr()
         } else {
-            self.current_chunk_index += 1;
-            if self.current_chunk_index >= self.chunks.len() {
-                self.chunks.push(Chunk::new(self.chunk_size));
-                assert_eq!(self.current_chunk_index, self.chunks.len() - 1);
+            let existing = (self.current_chunk_index + 1..self.chunks.len())
+                .find_map(|index| self.chunks[index].allocate(layout).map(|ptr| (index, ptr)));
+            if let Some((index, ptr)) = existing {
+                self.current_chunk_index = index;
+                ptr.as_ptr()
+            } else {
+                let chunk_size = NonZeroUsize::new(layout.size().max(self.chunk_size.get()))
+                    .expect("non-zero layout");
+                self.chunks.push(Chunk::new(
+                    chunk_size,
+                    layout.align().max(align_of::<u128>()),
+                ));
+                self.current_chunk_index = self.chunks.len() - 1;
                 log::trace!(
                     "increased element arena capacity to {}kb",
                     self.capacity() / 1024,
                 );
-            }
-            current_chunk = &mut self.chunks[self.current_chunk_index];
-            if let Some(ptr) = current_chunk.allocate(layout) {
-                ptr.as_ptr()
-            } else {
-                panic!(
-                    "Arena chunk_size of {} is too small to allocate {} bytes",
-                    self.chunk_size,
-                    layout.size()
-                );
+                self.chunks[self.current_chunk_index]
+                    .allocate(layout)
+                    .expect("new chunk was sized for this allocation")
+                    .as_ptr()
             }
         };
 
@@ -277,6 +287,37 @@ mod tests {
 
         assert_eq!(x1.ptr.align_offset(std::mem::align_of_val(&*x1)), 0);
         assert_eq!(x2.ptr.align_offset(std::mem::align_of_val(&*x2)), 0);
+    }
+
+    #[test]
+    fn test_arena_overaligned_allocation_larger_than_chunk() {
+        #[repr(align(4096))]
+        struct Overaligned(u8);
+
+        let mut arena = Arena::new(8);
+        let value = arena.alloc(|| Overaligned(7));
+
+        assert_eq!(value.0, 7);
+        assert_eq!(value.ptr.align_offset(4096), 0);
+        assert!(arena.capacity() >= 4096);
+    }
+
+    #[test]
+    fn test_arena_zero_sized_value_is_dropped() {
+        struct ZeroSized;
+
+        static DROPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        impl Drop for ZeroSized {
+            fn drop(&mut self) {
+                DROPPED.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        DROPPED.store(false, std::sync::atomic::Ordering::Relaxed);
+        let mut arena = Arena::new(8);
+        arena.alloc(|| ZeroSized);
+        arena.clear();
+        assert!(DROPPED.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[test]

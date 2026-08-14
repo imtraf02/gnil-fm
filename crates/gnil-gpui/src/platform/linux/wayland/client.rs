@@ -87,9 +87,12 @@ use crate::{
 use crate::{
     SharedString,
     platform::linux::{
-        LinuxClient, get_xkb_compose_state, is_within_click_distance, read_fd,
+        LinuxClient, get_xkb_compose_state, is_within_click_distance, read_fd_bounded,
         wayland::{
-            clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES},
+            clipboard::{
+                Clipboard, DataOffer, FILE_LIST_MIME_TYPE, MAX_TEXT_TRANSFER_BYTES,
+                TEXT_MIME_TYPES, TRANSFER_TIMEOUT,
+            },
             cursor::Cursor,
             serial::{SerialKind, SerialTracker},
             window::WaylandWindow,
@@ -1890,7 +1893,11 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                     };
                     data_offer.set_actions(actions, preferred_action);
 
-                    let pipe = Pipe::new().unwrap();
+                    let Ok(pipe) = Pipe::new() else {
+                        log::error!("failed to create drag and drop pipe");
+                        data_offer.destroy();
+                        return;
+                    };
                     data_offer.receive(FILE_LIST_MIME_TYPE.to_string(), unsafe {
                         BorrowedFd::borrow_raw(pipe.write.as_raw_fd())
                     });
@@ -1898,7 +1905,8 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                     drop(pipe.write);
 
                     let read_task = state.common.background_executor.spawn(async {
-                        let buffer = unsafe { read_fd(fd)? };
+                        let buffer =
+                            read_fd_bounded(fd, MAX_TEXT_TRANSFER_BYTES, TRANSFER_TIMEOUT)?;
                         let text = String::from_utf8(buffer)?;
                         anyhow::Ok(text)
                     });

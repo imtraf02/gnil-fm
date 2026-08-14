@@ -162,6 +162,7 @@ fn open_with_async_content_keeps_both_menu_origins_stable(cx: &mut TestAppContex
                 desktop_file: PathBuf::from(format!("/tmp/editor-{index}.desktop")),
                 is_default: index == 0,
                 compatible: true,
+                declared_compatible: true,
             })
             .collect();
         cx.notify();

@@ -4,10 +4,9 @@ use std::{env, path::PathBuf, process::Command, rc::Rc, sync::Arc};
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use std::{
     ffi::OsString,
-    fs::File,
-    io::Read as _,
-    os::fd::{AsRawFd, FromRawFd},
-    time::Duration,
+    io::{self, Read as _},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -323,11 +322,39 @@ pub(super) fn get_xkb_compose_state(cx: &xkb::Context) -> Option<xkb::compose::S
 }
 
 #[cfg(any(feature = "wayland", feature = "x11"))]
-pub(super) unsafe fn read_fd(mut fd: filedescriptor::FileDescriptor) -> Result<Vec<u8>> {
-    let mut file = unsafe { File::from_raw_fd(fd.as_raw_fd()) };
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)?;
-    Ok(buffer)
+pub(super) fn read_fd_bounded(
+    mut fd: filedescriptor::FileDescriptor,
+    max_bytes: usize,
+    timeout: Duration,
+) -> Result<Vec<u8>> {
+    fd.set_non_blocking(true)?;
+    let started = Instant::now();
+    let mut buffer = Vec::with_capacity(max_bytes.min(64 * 1024));
+    let mut chunk = [0_u8; 64 * 1024];
+
+    loop {
+        if started.elapsed() >= timeout {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "data transfer timed out").into());
+        }
+        let remaining = max_bytes.saturating_sub(buffer.len());
+        let read_len = remaining.saturating_add(1).min(chunk.len());
+        match fd.read(&mut chunk[..read_len]) {
+            Ok(0) => return Ok(buffer),
+            Ok(read) if read > remaining => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("data transfer exceeds {max_bytes} bytes"),
+                )
+                .into());
+            }
+            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 #[cfg(any(feature = "wayland", feature = "x11"))]
@@ -655,6 +682,8 @@ impl crate::Capslock {
 mod tests {
     use super::*;
     use crate::{Point, px};
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    use std::io::Write as _;
 
     #[test]
     fn test_is_within_click_distance() {
@@ -672,5 +701,40 @@ mod tests {
             zero,
             Point::new(px(5.0), px(5.1))
         ),);
+    }
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
+    fn read_fd_bounded_reads_to_eof() {
+        let mut pipe = filedescriptor::Pipe::new().unwrap();
+        pipe.write.write_all(b"gnil").unwrap();
+        drop(pipe.write);
+
+        let bytes = read_fd_bounded(pipe.read, 4, Duration::from_secs(1)).unwrap();
+
+        assert_eq!(bytes, b"gnil");
+    }
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
+    fn read_fd_bounded_rejects_oversized_payload() {
+        let mut pipe = filedescriptor::Pipe::new().unwrap();
+        pipe.write.write_all(b"oversized").unwrap();
+        drop(pipe.write);
+
+        let error = read_fd_bounded(pipe.read, 4, Duration::from_secs(1)).unwrap_err();
+
+        assert!(error.to_string().contains("exceeds 4 bytes"));
+    }
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
+    fn read_fd_bounded_times_out_when_writer_stalls() {
+        let pipe = filedescriptor::Pipe::new().unwrap();
+
+        let error = read_fd_bounded(pipe.read, 4, Duration::from_millis(20)).unwrap_err();
+
+        drop(pipe.write);
+        assert!(error.to_string().contains("timed out"));
     }
 }

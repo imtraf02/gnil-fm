@@ -23,7 +23,7 @@ impl FileManager {
     }
 
     fn extract_selected(&mut self, _: &ExtractSelected, _: &mut Window, cx: &mut Context<Self>) {
-        if self.tab.root == TabRoot::Trash || self.operation_running {
+        if self.tab.root == TabRoot::Trash {
             return;
         }
         let sources = self.selected_archives();
@@ -35,7 +35,7 @@ impl FileManager {
                 sources,
                 destination: self.tab.path.clone(),
             },
-            "Preparing archives…".into(),
+            "Preparing archives…",
             false,
             cx,
         );
@@ -47,7 +47,7 @@ impl FileManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tab.root == TabRoot::Trash || self.operation_running {
+        if self.tab.root == TabRoot::Trash {
             return;
         }
         let sources = self.selected_archives();
@@ -75,8 +75,10 @@ impl FileManager {
     }
 
     fn cancel_operation(&mut self, _: &CancelOperation, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(cancel) = &self.operation_cancel {
-            cancel.store(true, Ordering::Relaxed);
+        let active = self.operation_center.read(cx).active_snapshot();
+        if let Some(active) = active {
+            self.operation_center
+                .update(cx, |center, _| center.cancel(active.id));
             self.status_message = Some("Cancelling…".into());
             cx.notify();
         }
@@ -88,9 +90,6 @@ impl FileManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.operation_running {
-            return;
-        }
         let placeholder = match kind {
             CreateEntryKind::Folder => "Folder name",
             CreateEntryKind::File => "File name",
@@ -359,7 +358,7 @@ impl FileManager {
     }
 
     fn open_rename(&mut self, _: &OpenRename, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tab.root == TabRoot::Trash || self.operation_running {
+        if self.tab.root == TabRoot::Trash {
             return;
         }
         let paths = self.selection.effective_paths(&self.snapshot.entries);
@@ -459,9 +458,6 @@ impl FileManager {
     }
 
     fn finish_inline_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.operation_running {
-            return;
-        }
         let Some(rename) = self.inline_rename.take() else {
             return;
         };
@@ -492,7 +488,7 @@ impl FileManager {
         match operation {
             Ok(Some(operation)) => {
                 window.focus(&self.focus_handle(cx));
-                self.start_operation(operation, "Renaming…".into(), false, cx);
+                self.start_operation(operation, "Renaming…", false, cx);
             }
             Ok(None) => {
                 self.error = None;
@@ -569,11 +565,10 @@ impl FileManager {
     }
 
     fn apply_sheet(&mut self, _: &ApplySheet, _: &mut Window, cx: &mut Context<Self>) {
-        if self.operation_running
-            || matches!(
-                self.operation_sheet,
-                Some(OperationSheet::FolderProperties { .. })
-            )
+        if matches!(
+            self.operation_sheet,
+            Some(OperationSheet::FolderProperties { .. })
+        )
         {
             return;
         }
@@ -584,7 +579,7 @@ impl FileManager {
         match operation {
             Ok(operation) => {
                 self.error = None;
-                self.start_operation(operation, "Applying changes…".into(), false, cx);
+                self.start_operation(operation, "Applying changes…", false, cx);
             }
             Err(error) => {
                 if let OperationSheet::Extract { destination, .. } = &sheet {
@@ -601,101 +596,79 @@ impl FileManager {
     fn start_operation(
         &mut self,
         operation: FsOperation,
-        progress_message: String,
+        progress_message: &str,
         clear_clipboard_on_success: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.operation_running {
-            return;
-        }
-        self.operation_running = true;
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (progress_tx, progress_rx) = crossbeam_channel::unbounded();
-        self.operation_cancel = Some(cancel.clone());
-        self.operation_progress = None;
-        self.operation_progress_rx = Some(progress_rx);
         self.error = None;
-        self.status_message = Some(progress_message);
-        cx.notify();
-
-        let extraction = matches!(operation, FsOperation::ExtractArchives { .. });
-        let task = cx.background_executor().spawn(async move {
-            OperationExecutor.execute_with_progress(&operation, &cancel, &mut |progress| {
-                let _ = progress_tx.send(progress);
-            })
+        self.status_message = Some(progress_message.to_owned());
+        let origin = cx.entity_id();
+        self.operation_center.update(cx, |center, cx| {
+            center.enqueue(
+                operation,
+                progress_message,
+                origin,
+                clear_clipboard_on_success,
+                cx,
+            );
         });
-        self.poll_operation_progress(cx);
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.operation_running = false;
-                this.operation_cancel = None;
-                this.operation_progress_rx = None;
-                match result {
-                    Ok(outcome) => {
-                        if clear_clipboard_on_success {
-                            this.clipboard = None;
-                        }
-                        let undo_available = outcome.undo.is_some();
-                        if let Some(undo) = outcome.undo {
-                            this.undo_stack.push(undo);
-                        }
-                        if extraction && !undo_available {
-                            this.status_message = Some(format!(
-                                "Extracted {} archive{} · too many entries to undo",
-                                outcome.affected_paths.len(),
-                                if outcome.affected_paths.len() == 1 {
-                                    ""
-                                } else {
-                                    "s"
-                                }
-                            ));
-                        } else {
-                            this.status_message = Some(format!(
-                                "Updated {} item{}",
-                                outcome.affected_paths.len(),
-                                if outcome.affected_paths.len() == 1 {
-                                    ""
-                                } else {
-                                    "s"
-                                }
-                            ));
-                        }
-                        this.pending_reveal =
-                            outcome.affected_paths.first().cloned().into_iter().collect();
-                        this.operation_progress = None;
-                        this.load_directory(cx);
-                    }
-                    Err(error) => {
-                        this.status_message = None;
-                        this.operation_progress = None;
-                        this.error = Some(error.to_string());
-                        cx.notify();
-                    }
-                }
-            });
-        })
-        .detach();
+        cx.notify();
     }
 
-    fn poll_operation_progress(&mut self, cx: &mut Context<Self>) {
-        if let Some(receiver) = &self.operation_progress_rx {
-            while let Ok(progress) = receiver.try_recv() {
-                self.operation_progress = Some(progress);
+    fn handle_operation_center_event(
+        &mut self,
+        event: &OperationCenterEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let OperationCenterEvent::Finished {
+            origin,
+            state,
+            outcome,
+            error,
+            clear_clipboard,
+        } = event;
+        let is_origin = *origin == cx.entity_id();
+        if is_origin {
+            if *clear_clipboard && *state == JobState::Completed {
+                let clipboard_is_unchanged = self.clipboard.as_ref().is_some_and(|clipboard| {
+                    let expected = clipboard_text(clipboard).ok();
+                    let current = cx.read_from_clipboard().and_then(|item| item.text());
+                    expected == current
+                });
+                if clipboard_is_unchanged {
+                    cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+                }
+                self.clipboard = None;
             }
-        }
-        if !self.operation_running {
-            return;
-        }
-        let timer = cx.background_executor().timer(Duration::from_millis(50));
-        cx.spawn(async move |this, cx| {
-            timer.await;
-            let _ = this.update(cx, |this, cx| {
-                this.poll_operation_progress(cx);
-                cx.notify();
+            self.pending_reveal = outcome.affected_paths.first().cloned().into_iter().collect();
+            self.error.clone_from(error);
+            self.status_message = Some(match state {
+                JobState::Completed => format!(
+                    "Updated {} item{}",
+                    outcome.affected_paths.len(),
+                    if outcome.affected_paths.len() == 1 { "" } else { "s" }
+                ),
+                JobState::CompletedWithIssues => format!(
+                    "Updated {} item{} · {} issue{}",
+                    outcome.affected_paths.len(),
+                    if outcome.affected_paths.len() == 1 { "" } else { "s" },
+                    outcome.issues.len() + outcome.skipped_paths.len(),
+                    if outcome.issues.len() + outcome.skipped_paths.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+                JobState::Cancelled => format!(
+                    "Cancelled · {} item{} completed",
+                    outcome.affected_paths.len(),
+                    if outcome.affected_paths.len() == 1 { "" } else { "s" }
+                ),
+                JobState::Failed => "File operation failed".into(),
+                _ => "File operation updated".into(),
             });
-        })
-        .detach();
+        }
+        self.load_directory(cx);
     }
 
     fn copy_selected(&mut self, _: &CopySelected, _: &mut Window, cx: &mut Context<Self>) {
@@ -838,7 +811,7 @@ impl FileManager {
                     destination: self.tab.path.clone(),
                     conflict: ConflictDecision::KeepBoth,
                 },
-                "Copying…".into(),
+                "Copying…",
                 false,
             ),
             FileClipboardMode::Cut => (
@@ -847,7 +820,7 @@ impl FileManager {
                     destination: self.tab.path.clone(),
                     conflict: ConflictDecision::Ask,
                 },
-                "Moving…".into(),
+                "Moving…",
                 true,
             ),
         };
@@ -861,9 +834,6 @@ impl FileManager {
         }
         let paths = self.selection.effective_paths(&self.snapshot.entries);
         if paths.is_empty() {
-            return;
-        }
-        if self.operation_running {
             return;
         }
         let count = paths.len();
@@ -882,7 +852,7 @@ impl FileManager {
             let _ = this.update(cx, |this, cx| {
                 this.start_operation(
                     FsOperation::Trash { paths },
-                    format!(
+                    &format!(
                         "Moving {count} item{} to Trash…",
                         if count == 1 { "" } else { "s" }
                     ),
@@ -903,9 +873,6 @@ impl FileManager {
         if paths.is_empty() {
             return;
         }
-        if self.operation_running {
-            return;
-        }
         let count = paths.len();
         let subject = selection_subject(&paths);
         let answer = window.prompt(
@@ -922,7 +889,7 @@ impl FileManager {
             let _ = this.update(cx, |this, cx| {
                 this.start_operation(
                     FsOperation::DeletePermanently { paths },
-                    format!(
+                    &format!(
                         "Deleting {count} item{}…",
                         if count == 1 { "" } else { "s" }
                     ),
@@ -941,7 +908,7 @@ impl FileManager {
         cx: &mut Context<Self>,
     ) {
         let entries = self.selected_trash_entries();
-        if entries.is_empty() || self.operation_running {
+        if entries.is_empty() {
             return;
         }
         let conflicts = entries
@@ -954,7 +921,7 @@ impl FileManager {
                     entries,
                     replace_existing: false,
                 },
-                "Restoring from Trash…".into(),
+                "Restoring from Trash…",
                 false,
                 cx,
             );
@@ -980,7 +947,7 @@ impl FileManager {
                         entries,
                         replace_existing: true,
                     },
-                    "Replacing and restoring…".into(),
+                    "Replacing and restoring…",
                     false,
                     cx,
                 );
@@ -991,7 +958,7 @@ impl FileManager {
 
     fn purge_selected_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let entries = self.selected_trash_entries();
-        if entries.is_empty() || self.operation_running {
+        if entries.is_empty() {
             return;
         }
         let count = entries.len();
@@ -1012,7 +979,7 @@ impl FileManager {
             let _ = this.update(cx, |this, cx| {
                 this.start_operation(
                     FsOperation::PurgeTrash { entries },
-                    "Deleting from Trash…".into(),
+                    "Deleting from Trash…",
                     false,
                     cx,
                 );
@@ -1022,7 +989,7 @@ impl FileManager {
     }
 
     fn empty_trash(&mut self, _: &EmptyTrash, window: &mut Window, cx: &mut Context<Self>) {
-        if self.trash_entries.is_empty() || self.operation_running {
+        if self.trash_entries.is_empty() {
             return;
         }
         let entries: Vec<_> = self
@@ -1044,7 +1011,7 @@ impl FileManager {
             let _ = this.update(cx, |this, cx| {
                 this.start_operation(
                     FsOperation::PurgeTrash { entries },
-                    "Emptying Trash…".into(),
+                    "Emptying Trash…",
                     false,
                     cx,
                 );
@@ -1067,40 +1034,17 @@ impl FileManager {
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
-        if self.operation_running {
-            return;
-        }
-        let Some(record) = self.undo_stack.last().cloned() else {
+        let origin = cx.entity_id();
+        let queued = self
+            .operation_center
+            .update(cx, |center, cx| center.enqueue_undo(origin, cx));
+        if queued.is_none() {
             self.status_message = Some("Nothing to undo".into());
             cx.notify();
             return;
-        };
-        let label = record.label.clone();
-        self.operation_running = true;
+        }
         self.error = None;
-        self.status_message = Some(format!("Undoing {label}…"));
+        self.status_message = Some("Undoing latest operation…".into());
         cx.notify();
-        let task = cx
-            .background_executor()
-            .spawn(async move { OperationExecutor.undo(&record) });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.operation_running = false;
-                match result {
-                    Ok(()) => {
-                        this.undo_stack.pop();
-                        this.status_message = Some(format!("Undid {label}"));
-                        this.load_directory(cx);
-                    }
-                    Err(error) => {
-                        this.status_message = None;
-                        this.error = Some(format!("Could not undo: {error}"));
-                        cx.notify();
-                    }
-                }
-            });
-        })
-        .detach();
     }
 }

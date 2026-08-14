@@ -29,11 +29,12 @@ globset = "0.4.19"
 futures-lite = "2.6.1"
 libarchive2 = "0.2.1"
 image = { version = "0.25.6", default-features = false, features = ["avif", "bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
+libc = "0.2"
 mime_guess = "2.0.5"
 notify = "8.0.0"
-nix = { version = "0.31.3", features = ["fs"] }
+nix = { version = "0.31.3", features = ["dir", "fs", "process", "signal"] }
 regex = "1.11.1"
-quick-xml = "0.39.4"
+quick-xml = "0.41.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 url = "2.5.4"
@@ -43,11 +44,13 @@ tempfile = "3.20.0"
 thiserror = "2.0.12"
 toml = "0.8.22"
 trash = "5.2.2"
+tree_magic_mini = "3.2.2"
 uuid = { version = "1.16.0", features = ["v4", "serde"] }
 walkdir = "2.5.0"
 zbus = "5.18.0"
 flate2 = "1.1.2"
 bzip2 = "0.6.1"
+blake3 = "1.8.2"
 xz2 = "0.1.7"
 zstd = "0.13.3"
 freedesktop-desktop-entry = { version = "=0.8.1", default-features = false }

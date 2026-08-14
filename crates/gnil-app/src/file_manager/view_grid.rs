@@ -44,7 +44,6 @@ impl FileManager {
         let selection = self.selection.clone();
         let selected_paths = self.selected_paths_cached();
         let favorites = Arc::clone(&self.favorite_paths);
-        let operation_running = self.operation_running;
         let rubber_band = match &self.pointer_interaction {
             PointerInteraction::RubberBand(state) => Some(state.clone()),
             _ => None,
@@ -105,9 +104,7 @@ impl FileManager {
                                 highlighted,
                                 cursor_focused,
                                 is_favorite,
-                                drag_payload,
-                                operation_running,
-                                cx,
+                                drag_payload, cx,
                             ));
                         }
                         row
@@ -118,7 +115,7 @@ impl FileManager {
         .item_height(px(GRID_ROW_HEIGHT))
         .track_scroll(self.file_list_scroll.clone())
         .h_full();
-        self.render_grid_viewport(body.into_any_element(), operation_running, true, cx)
+        self.render_grid_viewport(body.into_any_element(), true, cx)
     }
 
     #[allow(
@@ -135,7 +132,6 @@ impl FileManager {
         cursor_focused: bool,
         is_favorite: bool,
         drag_payload: FileDragPayload,
-        operation_running: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let arm_payload = drag_payload.clone();
@@ -200,7 +196,7 @@ impl FileManager {
                     this.open_action_menu(ActionMenuPlacement::Cursor(event.position), cx);
                 }),
             )
-            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 let opens_directory = event.click_count() >= 2
                     && this
                         .snapshot
@@ -209,10 +205,10 @@ impl FileManager {
                         .is_some_and(FileEntry::is_directory_like);
                 this.select_from_click(index, event, !opens_directory, cx);
                 if event.click_count() >= 2 {
-                    this.open_index(index, cx);
+                    this.open_index(index, window, cx);
                 }
             }))
-            .when(!operation_running && !renaming, |card| {
+            .when(!renaming, |card| {
                 card.on_drag(drag_payload, |payload, cursor_offset, _, cx| {
                     cx.new(|_| DragGhost {
                         payload: payload.clone(),
@@ -227,7 +223,7 @@ impl FileManager {
                 let internal_drop_target = drop_target.clone();
                 let external_drop_target = drop_target;
                 card.can_drop(move |value, _, _| {
-                    can_drop_value(value, &predicate_target, operation_running)
+                    can_drop_value(value, &predicate_target)
                 })
                 .drag_over::<FileDragPayload>(|style, _, _, _| {
                     style
@@ -462,10 +458,10 @@ impl FileManager {
                                         }),
                                     )
                                     .on_click(cx.listener(
-                                        move |this, event: &ClickEvent, _, cx| {
+                                        move |this, event: &ClickEvent, window, cx| {
                                             this.select_from_click(index, event, true, cx);
                                             if event.click_count() >= 2 {
-                                                this.open_index(index, cx);
+                                                this.open_index(index, window, cx);
                                             }
                                         },
                                     ))
@@ -503,13 +499,12 @@ impl FileManager {
         .item_height(px(GRID_ROW_HEIGHT))
         .track_scroll(self.file_list_scroll.clone())
         .h_full();
-        self.render_grid_viewport(body.into_any_element(), true, false, cx)
+        self.render_grid_viewport(body.into_any_element(), false, cx)
     }
 
     fn render_grid_viewport(
         &self,
         body: AnyElement,
-        operation_running: bool,
         allow_background_menu: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -524,7 +519,7 @@ impl FileManager {
             .min_h_0()
             .can_drop(move |value, _, _| {
                 value.downcast_ref::<ExternalPaths>().is_some_and(|paths| {
-                    can_external_drop_value(paths, &predicate_target, operation_running)
+                    can_external_drop_value(paths, &predicate_target)
                 })
             })
             .drag_over::<ExternalPaths>(|style, _, _, _| {

@@ -667,18 +667,19 @@ impl FileManager {
         }
     }
 
-    fn can_internal_drop(&self, payload: &FileDragPayload, target: &DropTarget) -> bool {
-        can_internal_drop_value(payload, target, self.operation_running)
+    fn can_internal_drop(payload: &FileDragPayload, target: &DropTarget) -> bool {
+        can_internal_drop_value(payload, target)
     }
 
     fn external_paths(paths: &ExternalPaths) -> Vec<PathBuf> {
         sanitized_external_paths(paths)
     }
 
-    fn can_external_drop(&self, paths: &ExternalPaths, target: &DropTarget) -> bool {
-        can_external_drop_value(paths, target, self.operation_running)
+    fn can_external_drop(paths: &ExternalPaths, target: &DropTarget) -> bool {
+        can_external_drop_value(paths, target)
     }
 
+    #[allow(clippy::unused_self)]
     fn update_internal_drop_cursor(
         &mut self,
         event: &DragMoveEvent<FileDragPayload>,
@@ -695,7 +696,7 @@ impl FileManager {
             cx.set_active_drag_cursor_style(CursorStyle::Arrow, window);
             return;
         }
-        let valid = self.can_internal_drop(payload, target);
+        let valid = Self::can_internal_drop(payload, target);
         payload.visual.set_valid_target(valid);
         let cursor = if valid {
             if payload.visual.copy() {
@@ -709,6 +710,7 @@ impl FileManager {
         cx.set_active_drag_cursor_style(cursor, window);
     }
 
+    #[allow(clippy::unused_self)]
     fn update_external_drop_cursor(
         &mut self,
         event: &DragMoveEvent<ExternalPaths>,
@@ -719,7 +721,7 @@ impl FileManager {
         if !event.bounds.contains(&event.event.position) {
             return;
         }
-        let cursor = if self.can_external_drop(event.drag(cx), target) {
+        let cursor = if Self::can_external_drop(event.drag(cx), target) {
             CursorStyle::DragCopy
         } else {
             CursorStyle::OperationNotAllowed
@@ -734,14 +736,14 @@ impl FileManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.can_internal_drop(payload, &target) {
+        if !Self::can_internal_drop(payload, &target) {
             return;
         }
         let Ok(intent) = internal_drop_intent(
             payload,
             &target,
             payload.visual.copy(),
-            self.operation_running,
+            false,
         ) else {
             return;
         };
@@ -770,7 +772,7 @@ impl FileManager {
             DropIntent::Copy => "Copying…",
             DropIntent::Trash => "Moving to Trash…",
         };
-        self.start_operation(operation, message.into(), false, cx);
+        self.start_operation(operation, message, false, cx);
     }
 
     fn perform_external_drop(
@@ -779,7 +781,7 @@ impl FileManager {
         target: DropTarget,
         cx: &mut Context<Self>,
     ) {
-        if !self.can_external_drop(paths, &target) {
+        if !Self::can_external_drop(paths, &target) {
             return;
         }
         let paths = Self::external_paths(paths);
@@ -792,7 +794,7 @@ impl FileManager {
                 destination,
                 conflict: ConflictDecision::KeepBoth,
             },
-            "Copying dropped files…".into(),
+            "Copying dropped files…",
             false,
             cx,
         );
@@ -922,16 +924,13 @@ impl FileManager {
         .detach();
     }
 
-    fn open_index(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn open_index(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.tab.root == TabRoot::Trash {
-            if let Some(entry) = self.trash_entries.get(index)
-                && let Err(error) = std::process::Command::new("xdg-open")
-                    .arg(&entry.reference.trashed_path)
-                    .spawn()
-            {
-                self.error = Some(error.to_string());
-                cx.notify();
-            }
+            let Some(entry) = self.trash_entries.get(index) else {
+                return;
+            };
+            let path = entry.reference.trashed_path.clone();
+            self.quick_open_file(path, window, cx);
             return;
         }
         let Some(entry) = self.snapshot.entries.get(index).cloned() else {
@@ -939,21 +938,17 @@ impl FileManager {
         };
         match entry.kind {
             FileKind::Directory => {
+                self.quick_open_serial = self.quick_open_serial.wrapping_add(1);
                 self.tab.navigate_within_root(entry.path);
                 self.load_directory(cx);
             }
             FileKind::Symlink if entry.is_directory_like() => {
+                self.quick_open_serial = self.quick_open_serial.wrapping_add(1);
                 self.tab.navigate_within_root(entry.path);
                 self.load_directory(cx);
             }
             _ => {
-                if let Err(error) = std::process::Command::new("xdg-open")
-                    .arg(&entry.path)
-                    .spawn()
-                {
-                    self.error = Some(error.to_string());
-                    cx.notify();
-                }
+                self.quick_open_file(entry.path, window, cx);
             }
         }
     }

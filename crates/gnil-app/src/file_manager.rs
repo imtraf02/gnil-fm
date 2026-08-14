@@ -26,8 +26,9 @@ use crate::empty_space_menu::{
 };
 use crate::open_with::{
     DesktopApplication, OpenWithCatalog, discover_applications, filter_applications,
-    launch_application, set_default_application,
+    launch_application, launch_safe_default, set_default_application,
 };
+use crate::operation_center::{OperationCenterEvent, OperationCoordinator, operation_coordinator};
 use crate::path_input::{
     PathInputState, PathSuggestion, PathTarget, completion_candidates, resolve_path_input,
     single_pasted_path, validate_path,
@@ -58,15 +59,14 @@ use gnil_clipboard::{
 };
 use gnil_core::{
     ActionId, AppSettings, ConfigPaths, ConflictDecision, DirectoryLoadPhase, DirectorySnapshot,
-    EntryMetadata, FileEntry, FileKind, FileLayout, FileMetadata, FsOperation, JobProgress,
+    EntryMetadata, FileEntry, FileKind, FileLayout, FileMetadata, FsOperation, JobState,
     KeymapOverrides, PermissionChange, RenamePair, SelectionState, SortDirection, SortField,
-    TabRoot, TabState, ThemeAppearance, ThemeCatalog, ThemeMode, TrashEntryRef, UndoRecord,
-    natural_cmp,
+    TabRoot, TabState, ThemeAppearance, ThemeCatalog, ThemeMode, TrashEntryRef, natural_cmp,
 };
 use gnil_fs::{
-    DeviceEntry, DeviceKind, DirectoryWatcher, OperationExecutor, ScanOptions, SearchOptions,
-    TrashEntry, WatchEvent, eject_device, mount_device, scan_devices, scan_directory_progressive,
-    scan_entry, scan_trash, search_paths, unmount_device,
+    DeviceEntry, DeviceKind, DirectoryWatcher, ScanOptions, SearchOptions, TrashEntry, WatchEvent,
+    eject_device, mount_device, scan_devices, scan_directory_progressive, scan_entry, scan_trash,
+    search_paths, unmount_device,
 };
 use gnil_preview::{
     PreviewCache, PreviewError, PreviewRequest, PreviewResult, PreviewService, ThumbnailRequest,
@@ -76,10 +76,11 @@ use gpui::{
     AnchoredPositionMode, Animation, AnimationExt as _, AnyElement, AnyView, App, Application,
     Bounds, ClickEvent, ClipboardItem, Context, Corner, CursorStyle, Div, DragMoveEvent, Entity,
     ExternalPaths, FocusHandle, Focusable, Global, Hsla, KeyBinding, ModifiersChangedEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PromptLevel, Render,
-    ScrollStrategy, SharedString, Stateful, StyleRefinement, Subscription, UniformListScrollHandle,
-    Window, WindowAppearance, WindowBounds, WindowOptions, actions, anchored, deferred, div, img,
-    point, prelude::*, px, relative, rgb, size, uniform_list,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PromptLevel, QuitPolicy,
+    Render, ScrollStrategy, SharedString, Stateful, StyleRefinement, Subscription,
+    UniformListScrollHandle, Window, WindowAppearance, WindowBounds, WindowOptions, actions,
+    anchored, bounded_image_cache, deferred, div, img, point, prelude::*, px, relative, rgb, size,
+    uniform_list,
 };
 
 actions!(
@@ -323,22 +324,6 @@ struct GridPreviewRequest {
     source: PathBuf,
 }
 
-struct DragGhost {
-    payload: FileDragPayload,
-    cursor_offset: gpui::Point<Pixels>,
-}
-
-#[derive(Clone)]
-struct FavoriteDragPayload {
-    path: PathBuf,
-    label: String,
-}
-
-struct FavoriteDragGhost {
-    label: String,
-    cursor_offset: gpui::Point<Pixels>,
-}
-
 #[derive(Default)]
 struct DragPayloadCache {
     single: HashMap<PathBuf, FileDragPayload>,
@@ -346,93 +331,6 @@ struct DragPayloadCache {
     selected: HashMap<PathBuf, FileDragPayload>,
     selected_revision: u64,
     selected_generation: u64,
-}
-
-impl Render for DragGhost {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let lifted = self.payload.visual.lifted();
-        let copy = self.payload.visual.copy();
-        let count = self.payload.paths.len();
-        div()
-            .pl(self.cursor_offset.x - px(12.0))
-            .pt(self.cursor_offset.y - px(18.0))
-            .opacity(if lifted { 1.0 } else { 0.0 })
-            .child(
-                div()
-                    .h(px(38.0))
-                    .max_w(px(236.0))
-                    .px_2()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(if copy { accent() } else { border_focused() }))
-                    .bg(rgb(surface_elevated()))
-                    .shadow_md()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_xs()
-                    .text_color(rgb(text_emphasized()))
-                    .child(ui_icon(
-                        self.payload.first_icon,
-                        IconSize::Compact,
-                        IconTone::Default,
-                    ))
-                    .child(
-                        div()
-                            .max_w(px(150.0))
-                            .truncate()
-                            .child(self.payload.first_name.clone()),
-                    )
-                    .when(count > 1, |ghost| {
-                        ghost.child(
-                            div()
-                                .h_5()
-                                .min_w(px(24.0))
-                                .px_1()
-                                .rounded_full()
-                                .bg(rgb(accent_background()))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(count.to_string()),
-                        )
-                    })
-                    .when(copy, |ghost| {
-                        ghost.child(div().text_color(rgb(accent())).child("Copy"))
-                    }),
-            )
-    }
-}
-
-impl Render for FavoriteDragGhost {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .pl(self.cursor_offset.x - px(12.0))
-            .pt(self.cursor_offset.y - px(17.0))
-            .child(
-                div()
-                    .h(px(34.0))
-                    .max_w(px(204.0))
-                    .px_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(border_focused()))
-                    .bg(rgb(surface_elevated()))
-                    .shadow_md()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_xs()
-                    .text_color(rgb(text_emphasized()))
-                    .child(ui_icon(
-                        "icons/folder-favorite.svg",
-                        IconSize::Compact,
-                        IconTone::Accent,
-                    ))
-                    .child(div().max_w(px(150.0)).truncate().child(self.label.clone())),
-            )
-    }
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -459,18 +357,17 @@ struct FileManager {
     error: Option<String>,
     generation: u64,
     places: Vec<(String, PathBuf)>,
-    undo_stack: Vec<UndoRecord>,
-    operation_running: bool,
-    operation_cancel: Option<Arc<AtomicBool>>,
-    operation_progress: Option<JobProgress>,
-    operation_progress_rx: Option<crossbeam_channel::Receiver<JobProgress>>,
+    operation_center: Entity<OperationCoordinator>,
+    operation_center_subscription: Option<Subscription>,
+    operations_menu_open: bool,
+    operations_menu_closing: bool,
     status_message: Option<String>,
     clipboard: Option<FileClipboard>,
     action_menu: Option<ActionMenuState>,
     action_menu_serial: u64,
-    open_with_catalogs: HashMap<String, OpenWithCatalog>,
     open_with_chooser: Option<OpenWithChooserState>,
     open_with_serial: u64,
+    quick_open_serial: u64,
     empty_space_menu: Option<EmptySpaceMenuState>,
     empty_space_menu_serial: u64,
     operation_sheet: Option<OperationSheet>,
@@ -745,6 +642,7 @@ impl FileManager {
         let (path_input, path_input_subscription) = Self::create_path_input(path, cx);
         let (file_search_input, file_search_subscription) = Self::create_file_search(cx);
         let surfaces = FileManagerSurfaces::install(cx);
+        let operation_center = operation_coordinator(cx);
         let favorite_availability = favorite_availability(&settings.favorites);
         let favorite_paths = Arc::new(settings.favorites.iter().cloned().collect());
         let mut manager = Self {
@@ -770,19 +668,18 @@ impl FileManager {
             error: None,
             generation: 0,
             places: places(),
-            undo_stack: Vec::new(),
-            operation_running: false,
-            operation_cancel: None,
-            operation_progress: None,
-            operation_progress_rx: None,
+            operation_center: operation_center.clone(),
+            operation_center_subscription: None,
+            operations_menu_open: false,
+            operations_menu_closing: false,
             status_message: migrated_legacy_keymap
                 .then(|| "Migrated legacy keyboard profile to the default keymap.".into()),
             clipboard: None,
             action_menu: None,
             action_menu_serial: 0,
-            open_with_catalogs: HashMap::new(),
             open_with_chooser: None,
             open_with_serial: 0,
+            quick_open_serial: 0,
             empty_space_menu: None,
             empty_space_menu_serial: 0,
             operation_sheet: None,
@@ -833,7 +730,7 @@ impl FileManager {
             scan_cancel: None,
             preview_cancel: None,
             preview_service: Arc::new(PreviewService::default()),
-            preview_cache: Arc::new(Mutex::new(PreviewCache::new(memory_cache_mib))),
+            preview_cache: Arc::new(Mutex::new(PreviewCache::new(memory_cache_mib / 4))),
             thumbnail_service: Arc::new(ThumbnailService),
             directory_watcher: None,
             watched_path: None,
@@ -848,6 +745,12 @@ impl FileManager {
             };
             this.sync_preferences(&settings, &keymap, cx);
         }));
+        manager.operation_center_subscription = Some(cx.subscribe(
+            &operation_center,
+            |this, _, event: &OperationCenterEvent, cx| {
+                this.handle_operation_center_event(event, cx);
+            },
+        ));
         PreferencesWindow::install_keybindings(&keymap, cx);
         manager.refresh_favorite_availability(cx);
         manager
@@ -863,6 +766,7 @@ include!("file_manager/interaction.rs");
 include!("file_manager/open_with.rs");
 include!("file_manager/operations.rs");
 include!("file_manager/command_bar.rs");
+include!("file_manager/drag_ghost.rs");
 include!("file_manager/menu_geometry.rs");
 include!("file_manager/grid_preview.rs");
 include!("file_manager/detail_columns.rs");
@@ -893,10 +797,19 @@ pub fn run() {
     let request = initial_open_request();
     Application::new()
         .with_assets(Assets)
+        .with_quit_policy(QuitPolicy::Explicit)
         .run(move |cx: &mut App| {
             cx.on_action(|_: &Quit, cx| cx.quit());
+            let coordinator = operation_coordinator(cx);
+            cx.on_window_closed(move |cx| {
+                if cx.windows().is_empty() && !coordinator.read(cx).has_active_operations() {
+                    cx.quit();
+                }
+            })
+            .detach();
             if let Err(error) = open_main_window(request, cx) {
                 eprintln!("Could not open gnil-fm window: {error}");
+                cx.quit();
             }
         });
 }
@@ -907,13 +820,13 @@ mod tests {
         ActionMenuPlacement, ActionMenuState, ActivateFileSearch, CommandBarMenuKind,
         EmptySpaceMenuCapabilities, EmptySpaceMenuContext, EmptySpaceMenuState, EmptySpaceSubmenu,
         EmptySpaceViewState, FileManager, FileSearchScope, HandleEscape, MenuAnimationState,
-        MenuContext, OpenRename, OperationSheet, PointerInteraction, ToggleFavorite,
-        ToggleSettings, breadcrumb_segments, favorite_availability, format_bytes, place_is_active,
-        resolve_theme_appearance, size_label, visible_breadcrumb_segments,
+        MenuContext, OpenRename, OperationSheet, PointerInteraction, ToggleFavorite, ToggleHidden,
+        TogglePreview, ToggleSettings, breadcrumb_segments, favorite_availability, format_bytes,
+        place_is_active, resolve_theme_appearance, size_label, visible_breadcrumb_segments,
     };
     use gnil_core::{
         ConfigPaths, DirectoryLoadPhase, DirectorySnapshot, EntryMetadata, FileEntry, FileKind,
-        FileMetadata, SortSpec, ThemeAppearance, ThemeMode,
+        FileLayout, FileMetadata, SortSpec, ThemeAppearance, ThemeMode,
     };
     use gpui::{ExternalPaths, Modifiers, MouseButton, TestAppContext, point, px, size};
     use std::{
@@ -1301,6 +1214,7 @@ mod tests {
     fn action_menu_does_not_block_an_outside_file_click(cx: &mut TestAppContext) {
         let (manager, cx) = cx.add_window_view(|_, cx| {
             let mut manager = FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx);
+            manager.settings.file_layout = super::FileLayout::Details;
             manager.snapshot = test_snapshot(2);
             manager.selection.select_only(1, &manager.snapshot.entries);
             manager.action_menu_serial = 1;
@@ -1625,6 +1539,7 @@ mod tests {
         let (manager, cx) = cx.add_window_view(|_, cx| {
             let mut manager = FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx);
             manager.snapshot = test_snapshot(2);
+            manager.settings.file_layout = super::FileLayout::Details;
             manager
         });
         let viewport = cx.read(|cx| {
@@ -1762,11 +1677,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn running_operation_disables_native_file_drag(cx: &mut TestAppContext) {
+    fn file_drag_remains_available_without_a_global_operation_lock(cx: &mut TestAppContext) {
         let (manager, cx) = cx.add_window_view(|_, cx| {
             let mut manager = FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx);
             manager.snapshot = test_snapshot(2);
-            manager.operation_running = true;
+            manager.settings.file_layout = super::FileLayout::Details;
             manager
         });
         let viewport = cx.read(|cx| {
@@ -1782,12 +1697,17 @@ mod tests {
 
         cx.simulate_mouse_down(origin, MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_move(
+            point(origin.x + px(6.0), origin.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
             point(origin.x + px(10.0), origin.y),
             MouseButton::Left,
             Modifiers::none(),
         );
 
-        assert!(cx.take_external_file_drag().is_none());
+        assert!(cx.take_external_file_drag().is_some());
     }
 
     #[gpui::test]
@@ -1960,6 +1880,7 @@ mod tests {
     }
 
     include!("file_manager/tests/menu_submenus.rs");
+    include!("file_manager/tests/view_persistence.rs");
 
     #[gpui::test]
     fn file_list_uses_exact_space_left_by_preview(cx: &mut TestAppContext) {
@@ -1996,9 +1917,13 @@ mod tests {
 
     #[gpui::test]
     fn preview_toolbar_button_toggles_the_right_panel(cx: &mut TestAppContext) {
-        let (manager, cx) = cx.add_window_view(|_, cx| {
+        let config_root = tempfile::tempdir().unwrap();
+        let config_paths = test_config_paths(config_root.path());
+        let (manager, cx) = cx.add_window_view(move |_, cx| {
             let mut manager = FileManager::new(Path::new("/tmp"), ThemeAppearance::Dark, cx);
+            manager.config_paths = config_paths;
             manager.preview_visible = false;
+            manager.settings.preview_enabled = false;
             manager
         });
         cx.run_until_parked();
@@ -2011,6 +1936,7 @@ mod tests {
         let position = point(toggle.left() + px(12.0), toggle.top() + px(12.0));
 
         cx.simulate_click(position, Modifiers::none());
+        cx.run_until_parked();
         assert!(cx.read(|cx| manager.read(cx).preview_visible));
         let preview = cx
             .debug_bounds("preview-surface")
@@ -2018,6 +1944,7 @@ mod tests {
         assert!(cx.read(|cx| command_bar.read(cx).render_count) > renders_before);
 
         cx.simulate_click(position, Modifiers::none());
+        cx.run_until_parked();
         assert!(!cx.read(|cx| manager.read(cx).preview_visible));
         let expanded_list = cx
             .debug_bounds("file-list-surface-frame")
