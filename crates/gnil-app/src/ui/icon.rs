@@ -9,15 +9,17 @@ pub(crate) enum IconSize {
     Compact,
     Standard,
     Detail,
+    Grid,
 }
 
 impl IconSize {
-    const fn pixels(self) -> Pixels {
+    pub(crate) const fn pixels(self) -> Pixels {
         match self {
             Self::Small => px(16.0),
             Self::Compact => px(20.0),
             Self::Standard => px(24.0),
             Self::Detail => px(32.0),
+            Self::Grid => px(64.0),
         }
     }
 }
@@ -63,6 +65,7 @@ mod tests {
         assert_ne!(IconSize::Small, IconSize::Compact);
         assert_ne!(IconSize::Compact, IconSize::Standard);
         assert_ne!(IconSize::Standard, IconSize::Detail);
+        assert_ne!(IconSize::Detail, IconSize::Grid);
         assert_ne!(IconTone::Muted, IconTone::Default);
         assert_ne!(IconTone::Default, IconTone::Emphasized);
     }

@@ -4,8 +4,8 @@ use futures::channel::oneshot;
 
 use crate::{
     AnyView, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, ParentElement, PromptButton, PromptLevel, Render,
-    StatefulInteractiveElement, Styled, div, opaque_grey, white,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, PromptButton, PromptLevel,
+    Render, StatefulInteractiveElement, Styled, div, opaque_grey, white,
 };
 
 use super::Window;
@@ -104,6 +104,16 @@ impl Render for FallbackPromptRenderer {
         let prompt = div()
             .cursor_default()
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key.as_str() == "escape" {
+                    let cancel = this
+                        .actions
+                        .iter()
+                        .rposition(|a| a.is_cancel() || a.label().to_lowercase() == "cancel")
+                        .unwrap_or(this.actions.len().saturating_sub(1));
+                    cx.emit(PromptResponse(cancel));
+                }
+            }))
             .w_72()
             .bg(white())
             .rounded_lg()

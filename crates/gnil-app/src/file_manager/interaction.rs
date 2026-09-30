@@ -571,6 +571,7 @@ impl FileManager {
         self.preview_visible = self.settings.preview_enabled;
         self.auto_mount_removable = self.settings.auto_mount_removable;
         self.reduced_motion = self.settings.reduced_motion;
+        theme_runtime::set_reduced_motion(self.settings.reduced_motion);
         if self.preview_visible != preview_was_visible {
             self.invalidate_surfaces(SurfaceMask::COMMAND_BAR | SurfaceMask::FILE_LIST, cx);
         }

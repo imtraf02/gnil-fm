@@ -9,6 +9,7 @@ pub(crate) fn open_main_window(
     request: FileManagerOpenRequest,
     cx: &mut App,
 ) -> Result<(), String> {
+    crate::ui::prompt::register_prompt_builder(cx);
     let bounds = Bounds::centered(None, size(px(1180.0), px(760.0)), cx);
     let window = cx
         .open_window(

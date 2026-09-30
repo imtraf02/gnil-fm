@@ -4157,9 +4157,12 @@ impl Window {
                 .unwrap_or_else(|| {
                     self.build_custom_prompt(&prompt_builder, level, message, detail, &answers, cx)
                 }),
-            PromptBuilder::Custom(_) => {
-                self.build_custom_prompt(&prompt_builder, level, message, detail, &answers, cx)
-            }
+            PromptBuilder::Custom(_) => self
+                .platform_window
+                .prompt(level, message, detail, &answers)
+                .unwrap_or_else(|| {
+                    self.build_custom_prompt(&prompt_builder, level, message, detail, &answers, cx)
+                }),
         };
 
         cx.prompt_builder = Some(prompt_builder);

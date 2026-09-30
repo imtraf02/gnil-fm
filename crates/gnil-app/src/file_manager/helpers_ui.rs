@@ -287,11 +287,22 @@ fn file_icon(entry: &FileEntry) -> AnyElement {
         .w(px(26.0))
         .flex()
         .items_center()
-        .child(ui_icon(
-            file_icon_asset(entry),
-            IconSize::Compact,
-            IconTone::Default,
-        ))
+        .child(if entry.is_directory_like() && entry.kind == FileKind::Directory {
+            img("icons/folder-closed.svg")
+                .size(IconSize::Compact.pixels())
+                .into_any_element()
+        } else {
+            ui_icon(
+                file_icon_asset(entry),
+                IconSize::Compact,
+                if entry.is_directory_like() {
+                    IconTone::Accent
+                } else {
+                    IconTone::Default
+                },
+            )
+            .into_any_element()
+        })
         .into_any_element()
 }
 

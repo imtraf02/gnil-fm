@@ -1,3 +1,75 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L8.6 3.3A2 2 0 0 0 6.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1371" height="1147" viewBox="0 0 1371 1147">
+
+  <defs>
+    <!-- Màu xanh sage chính của mặt trước -->
+    <linearGradient id="front" x1="0" y1="0" x2="1" y2="0.15">
+      <stop offset="0%" stop-color="#558B6E"/>
+      <stop offset="50%" stop-color="#679D7F"/>
+      <stop offset="100%" stop-color="#7CAE93"/>
+    </linearGradient>
+
+    <!-- Màu xanh đậm của lớp phía sau -->
+    <linearGradient id="back" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2D4D3A"/>
+      <stop offset="100%" stop-color="#3D664E"/>
+    </linearGradient>
+
+    <!-- Phần giấy bên trong -->
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#EEF4F0"/>
+      <stop offset="100%" stop-color="#FFFFFF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- LỚP FOLDER PHÍA SAU -->
+  <path
+    d="
+      M 491 149
+      H 1190
+      C 1228 149 1258 181 1258 219
+      V 940
+      H 508
+      V 219
+      C 508 180 477 149 491 149
+      Z"
+    fill="url(#back)"/>
+
+  <!-- TỜ GIẤY BÊN TRONG -->
+  <path
+    d="
+      M 548 214
+      H 1160
+      C 1178 214 1190 227 1190 245
+      V 305
+      H 620
+      C 608 305 601 300 594 290
+      Z"
+    fill="url(#paper)"
+    stroke="#D5E3DA"
+    stroke-width="8"
+    stroke-linejoin="round"/>
+
+  <!-- MẶT TRƯỚC FOLDER -->
+  <path
+    d="
+      M 141 97
+      H 455
+      C 470 97 482 105 491 120
+      L 618 294
+      C 623 302 631 306 641 306
+      H 1198
+      C 1232 306 1258 332 1258 366
+      V 935
+      C 1258 971 1231 996 1195 996
+      H 140
+      C 104 996 77 970 77 935
+      V 157
+      C 77 123 103 97 141 97
+      Z"
+    fill="url(#front)"
+    stroke="#47755C"
+    stroke-width="8"
+    stroke-linejoin="round"/>
+
 </svg>

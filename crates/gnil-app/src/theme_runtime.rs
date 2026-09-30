@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use gnil_core::ThemeColors;
 
@@ -76,4 +76,15 @@ pub fn set_active(colors: ThemeColors) {
 #[must_use]
 pub fn selection_rgba() -> u32 {
     (accent() << 8) | 0x42
+}
+
+static REDUCED_MOTION: AtomicBool = AtomicBool::new(false);
+
+pub fn set_reduced_motion(reduced: bool) {
+    REDUCED_MOTION.store(reduced, Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn reduced_motion() -> bool {
+    REDUCED_MOTION.load(Ordering::Relaxed)
 }

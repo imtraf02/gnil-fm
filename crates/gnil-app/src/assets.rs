@@ -115,7 +115,10 @@ mod tests {
     fn functional_icons_follow_the_lucide_svg_contract() {
         for path in ASSET_PATHS.iter().filter(|path| {
             path.starts_with("icons/")
-                && !matches!(**path, "icons/empty-state.svg" | "icons/trash-empty.svg")
+                && !matches!(
+                    **path,
+                    "icons/empty-state.svg" | "icons/trash-empty.svg" | "icons/folder-closed.svg"
+                )
         }) {
             let source = std::str::from_utf8(
                 embedded_asset(path).expect("registered icon must have embedded bytes"),

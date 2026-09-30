@@ -1182,8 +1182,9 @@ impl PromptButton {
         PromptButton::Cancel(label.into())
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn is_cancel(&self) -> bool {
+    /// Returns true if this button is a Cancel button.
+    #[must_use]
+    pub fn is_cancel(&self) -> bool {
         matches!(self, PromptButton::Cancel(_))
     }
 

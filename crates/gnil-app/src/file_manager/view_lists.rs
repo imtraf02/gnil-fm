@@ -300,6 +300,7 @@ impl FileManager {
                                                 ))
                                                 .flex_1()
                                                 .min_w_0()
+                                                .overflow_hidden()
                                                 .on_any_mouse_down(|_, _, cx| {
                                                     cx.stop_propagation();
                                                 })

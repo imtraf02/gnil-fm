@@ -627,6 +627,7 @@ impl FileManager {
         let active_theme_name = active_theme.name.clone();
         let memory_cache_mib = settings.memory_cache_mib;
         theme_runtime::set_active(active_theme.colors);
+        theme_runtime::set_reduced_motion(settings.reduced_motion);
         let tab = TabState {
             show_hidden: settings.show_hidden,
             sort: settings.file_sort,
@@ -799,6 +800,7 @@ pub fn run() {
         .with_assets(Assets)
         .with_quit_policy(QuitPolicy::Explicit)
         .run(move |cx: &mut App| {
+            crate::ui::prompt::register_prompt_builder(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
             let coordinator = operation_coordinator(cx);
             cx.on_window_closed(move |cx| {

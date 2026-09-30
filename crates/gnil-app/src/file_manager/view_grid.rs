@@ -153,6 +153,7 @@ impl FileManager {
             .flex_none()
             .p_2()
             .rounded_md()
+            .overflow_hidden()
             .flex()
             .flex_col()
             .items_center()
@@ -262,6 +263,7 @@ impl FileManager {
                     .w_full()
                     .h(px(38.0))
                     .pt_1()
+                    .overflow_hidden()
                     .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .child(input)
@@ -347,19 +349,29 @@ impl FileManager {
                     |preview, line| preview.child(div().truncate().child(line.clone())),
                 )
                 .into_any_element(),
-            Some(GridPreviewState::Loading | GridPreviewState::Unavailable) | None => ui_icon(
-                file_icon_asset(entry),
-                IconSize::Detail,
-                if matches!(
-                    self.grid_previews.get(&entry.path),
-                    Some(GridPreviewState::Loading)
-                ) {
-                    IconTone::Muted
+            Some(GridPreviewState::Loading | GridPreviewState::Unavailable) | None => {
+                if entry.is_directory_like() && entry.kind == FileKind::Directory {
+                    img("icons/folder-closed.svg")
+                        .size(IconSize::Grid.pixels())
+                        .into_any_element()
                 } else {
-                    IconTone::Default
-                },
-            )
-            .into_any_element(),
+                    ui_icon(
+                        file_icon_asset(entry),
+                        IconSize::Grid,
+                        if matches!(
+                            self.grid_previews.get(&entry.path),
+                            Some(GridPreviewState::Loading)
+                        ) {
+                            IconTone::Muted
+                        } else if entry.is_directory_like() {
+                            IconTone::Accent
+                        } else {
+                            IconTone::Default
+                        },
+                    )
+                    .into_any_element()
+                }
+            }
         };
         div()
             .w_full()

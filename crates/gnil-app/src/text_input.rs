@@ -1,11 +1,12 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
-    fill, point, prelude::*, px, relative, rgb, rgba, size, svg,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun,
+    UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative,
+    rgb, rgba, size, svg,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -38,6 +39,7 @@ pub struct TextInput {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    scroll_x: Pixels,
     is_selecting: bool,
     key_context: &'static str,
     invalid: bool,
@@ -76,6 +78,7 @@ impl TextInput {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            scroll_x: px(0.),
             is_selecting: false,
             key_context: "TextInput",
             invalid: false,
@@ -193,15 +196,23 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace('\n', " "), window, cx);
+            let sanitized = text
+                .trim_matches(|c| c == '\r' || c == '\n')
+                .replace(['\r', '\n'], " ");
+            self.replace_text_in_range(None, &sanitized, window, cx);
         }
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         let selected = self.valid_range(self.selected_range.clone());
-        if !selected.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.content[selected].to_owned()));
-        }
+        let text_to_copy = if !selected.is_empty() {
+            self.content[selected].to_owned()
+        } else if !self.content.is_empty() {
+            self.content.to_string()
+        } else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text_to_copy));
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
@@ -225,6 +236,7 @@ impl TextInput {
         } else {
             self.move_to(offset, cx);
         }
+        cx.stop_propagation();
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -286,13 +298,14 @@ impl TextInput {
         let (Some(bounds), Some(line)) = (&self.last_bounds, &self.last_layout) else {
             return 0;
         };
-        if position.x <= bounds.left() {
+        let relative_x = position.x - bounds.left() + self.scroll_x;
+        if relative_x <= px(0.) {
             return 0;
         }
-        if position.x >= bounds.right() {
+        if relative_x >= line.width {
             return self.content.len();
         }
-        self.valid_offset(line.closest_index_for_x(position.x - bounds.left()))
+        self.valid_offset(line.closest_index_for_x(relative_x))
     }
 
     fn valid_offset(&self, offset: usize) -> usize {
@@ -432,8 +445,14 @@ impl EntityInputHandler for TextInput {
         let line = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range);
         Some(Bounds::from_corners(
-            point(bounds.left() + line.x_for_index(range.start), bounds.top()),
-            point(bounds.left() + line.x_for_index(range.end), bounds.bottom()),
+            point(
+                bounds.left() + line.x_for_index(range.start) - self.scroll_x,
+                bounds.top(),
+            ),
+            point(
+                bounds.left() + line.x_for_index(range.end) - self.scroll_x,
+                bounds.bottom(),
+            ),
         ))
     }
 
@@ -445,7 +464,8 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let bounds = self.last_bounds?;
         let line = self.last_layout.as_ref()?;
-        let index = line.index_for_x(point.x - bounds.left())?;
+        let relative_x = point.x - bounds.left() + self.scroll_x;
+        let index = line.index_for_x(relative_x)?;
         Some(self.offset_to_utf16(index))
     }
 }
@@ -457,6 +477,7 @@ struct PrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    scroll_x: Pixels,
 }
 
 impl IntoElement for TextElement {
@@ -489,6 +510,7 @@ impl Element for TextElement {
         (window.request_layout(style, [], cx), ())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
@@ -549,12 +571,36 @@ impl Element for TextElement {
             .text_system()
             .shape_line(display, font_size, &runs, None);
         let cursor_x = line.x_for_index(cursor);
+        let content_width = line.width;
+        let visible_width = bounds.size.width;
+
+        let mut scroll_x = input.scroll_x;
+        if content_width <= visible_width {
+            scroll_x = px(0.);
+        } else {
+            let max_scroll = (content_width - visible_width).max(px(0.));
+            let padding = px(8.0).min(visible_width / 4.0);
+            if !selected.is_empty() && selected.start == 0 && scroll_x == px(0.) {
+                scroll_x = px(0.);
+            } else {
+                if cursor_x < scroll_x + padding {
+                    scroll_x = (cursor_x - padding).max(px(0.));
+                } else if cursor_x > scroll_x + visible_width - padding {
+                    scroll_x = (cursor_x - visible_width + padding)
+                        .min(max_scroll)
+                        .max(px(0.));
+                }
+                scroll_x = scroll_x.clamp(px(0.), max_scroll);
+            }
+        }
+
+        let cursor_pos = bounds.left() + cursor_x - scroll_x;
         let (selection, cursor) = if selected.is_empty() {
             (
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + cursor_x, bounds.top()),
+                        point(cursor_pos, bounds.top()),
                         size(px(1.5), bounds.size.height),
                     ),
                     rgb(theme_runtime::accent()),
@@ -565,11 +611,11 @@ impl Element for TextElement {
                 Some(fill(
                     Bounds::from_corners(
                         point(
-                            bounds.left() + line.x_for_index(selected.start),
+                            bounds.left() + line.x_for_index(selected.start) - scroll_x,
                             bounds.top(),
                         ),
                         point(
-                            bounds.left() + line.x_for_index(selected.end),
+                            bounds.left() + line.x_for_index(selected.end) - scroll_x,
                             bounds.bottom(),
                         ),
                     ),
@@ -582,6 +628,7 @@ impl Element for TextElement {
             line: Some(line),
             cursor,
             selection,
+            scroll_x,
         }
     }
 
@@ -600,20 +647,29 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = state.selection.take() {
-            window.paint_quad(selection);
-        }
-        let line = state.line.take().expect("prepaint shaped line");
-        line.paint(bounds.origin, window.line_height(), window, cx)
+        let scroll_x = state.scroll_x;
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if let Some(selection) = state.selection.take() {
+                window.paint_quad(selection);
+            }
+            let line = state.line.take().expect("prepaint shaped line");
+            line.paint(
+                point(bounds.origin.x - scroll_x, bounds.origin.y),
+                window.line_height(),
+                window,
+                cx,
+            )
             .expect("paint input text");
-        if focus.is_focused(window)
-            && let Some(cursor) = state.cursor.take()
-        {
-            window.paint_quad(cursor);
-        }
-        self.input.update(cx, |input, _| {
-            input.last_layout = Some(line);
-            input.last_bounds = Some(bounds);
+            if focus.is_focused(window)
+                && let Some(cursor) = state.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
+            self.input.update(cx, |input, _| {
+                input.last_layout = Some(line);
+                input.last_bounds = Some(bounds);
+                input.scroll_x = scroll_x;
+            });
         });
     }
 }
@@ -643,6 +699,7 @@ impl Render for TextInput {
             .h(px(34.))
             .w_full()
             .px_2()
+            .overflow_hidden()
             .when(
                 self.trailing_space == TrailingSpace::Action,
                 gpui::Styled::pr_8,
@@ -673,6 +730,7 @@ impl Render for TextInput {
                 div()
                     .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
                     .child(TextElement { input: cx.entity() }),
             )
     }
@@ -703,10 +761,22 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("end", End, Some(context)),
             KeyBinding::new("ctrl-a", SelectAll, Some(context)),
             KeyBinding::new("ctrl-c", Copy, Some(context)),
+            KeyBinding::new("ctrl-insert", Copy, Some(context)),
             KeyBinding::new("ctrl-x", Cut, Some(context)),
+            KeyBinding::new("shift-delete", Cut, Some(context)),
         ]);
     }
-    cx.bind_keys([KeyBinding::new("ctrl-v", Paste, Some("TextInput"))]);
+    for context in [
+        "TextInput",
+        "SearchInput",
+        "OpenWithInput",
+        "InlineRenameInput",
+    ] {
+        cx.bind_keys([
+            KeyBinding::new("ctrl-v", Paste, Some(context)),
+            KeyBinding::new("shift-insert", Paste, Some(context)),
+        ]);
+    }
 }
 
 #[cfg(test)]

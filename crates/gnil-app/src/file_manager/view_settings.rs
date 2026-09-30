@@ -570,6 +570,7 @@ impl PreferencesWindow {
             this.keymap_overrides = state.keymap.clone();
             this.keymap_error.clone_from(&state.keymap_error);
             this.reduced_motion = this.settings.reduced_motion;
+            theme_runtime::set_reduced_motion(this.settings.reduced_motion);
             cx.notify();
         }));
         window
@@ -587,6 +588,7 @@ impl PreferencesWindow {
             self.keymap_error = Some(format!("Could not save settings: {error}"));
         }
         self.reduced_motion = self.settings.reduced_motion;
+        theme_runtime::set_reduced_motion(self.settings.reduced_motion);
         cx.notify();
     }
 
